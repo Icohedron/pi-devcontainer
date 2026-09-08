@@ -1,0 +1,41 @@
+{
+  "name": "pi-devcontainer",
+  "version": "0.1.0",
+  "description": "Route pi's built-in tool calls into your project's devcontainer",
+  "license": "MIT",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "devcontainer",
+    "devcontainers",
+    "docker",
+    "podman",
+    "container",
+    "remote-execution",
+    "sandbox"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/USER/pi-devcontainer.git"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/test-discovery.ts && node test/test-config.ts && node test/test-security.ts && node test/test-routing.ts && node test/test-harness.ts && node test/test-escape.ts && node test/test-extension.ts container && node test/test-extension.ts disabled && node test/test-extension.ts strict && node test/test-extension.ts nested && node test/test-menu.ts"
+  }
+}

@@ -1,0 +1,11 @@
+# devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# Node
+node_modules/
+
+# Local pi state, except project settings which are meant to be shared
+.pi/*
+!.pi/settings.json
