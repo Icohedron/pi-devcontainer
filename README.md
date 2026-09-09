@@ -222,27 +222,32 @@ uses whichever one actually has the container.
 
 Settings live in pi's own `settings.json` under a top-level `devcontainer` key:
 
-| Scope | File | Applies |
-|-------|------|---------|
-| user | `~/.pi/agent/settings.json` | always |
-| project | `<project>/.pi/settings.json` | trusted projects only |
+| Scope | File | What it may set |
+|-------|------|-----------------|
+| user | `~/.pi/agent/settings.json` | everything |
+| project | `<project>/.pi/settings.json` | `enabled` only, and only in a trusted project |
 
-Project settings win key by key; anything they do not set keeps the user value.
+Most keys decide which binary runs on the host, and the model can write files in
+the workspace, so a project that could set them would be granting itself host
+execution. Projects may therefore only turn routing off; anything else in a
+project's settings is ignored with a warning naming the keys it skipped. Where a
+project does set `enabled`, it wins over the user value.
+
 JSONC (comments, trailing commas) is accepted. Unknown keys and wrongly typed
 values are ignored with a warning rather than failing the session.
 
 | Key | Type | Example | Purpose |
 |-----|------|---------|---------|
-| `enabled` | boolean | `false` | Stay on the host in this project |
-| `runtime` | string | `"/usr/local/bin/docker"` | Container CLI name or path. Skips probing |
-| `runtimeArgs` | string[] | `["--context", "desktop-linux"]` | Global flags the CLI needs *before* its subcommand, such as selecting a docker context or a remote daemon. They are inserted as `docker --context desktop-linux ps ...` |
-| `execArgs` | string[] | `["--env", "TERM=xterm-256color"]` | Extra flags for the `exec` call only, so they apply to commands run in the container but not to lookups |
-| `devcontainerPath` | string | `"/opt/homebrew/bin/devcontainer"` | devcontainer CLI used by `/devcontainer up` |
-| `upArgs` | string[] | `["--remove-existing-container"]` | Extra flags for `devcontainer up` |
-| `hostCommands` | string[] | `["tuicr", "herdr"]` | Commands that must run on the host, not in the container |
-| `tools` | string[] | `["bash", "write", "edit"]` | Which built-ins to claim. Default: all seven |
-| `userBash` | `"container"` \| `"host"` | `"host"` | Where `!` commands run. Default: `"container"` |
-| `requireContainer` | boolean | `true` | Fail tool calls instead of falling back to the host when no container is running |
+| `enabled` | boolean | `false` | Default `true`. Set `false` to stay on the host. The only key a project may set |
+| `runtime` | string | `"/usr/local/bin/docker"` | Default: probe `docker` then `podman`. Naming one skips the probe |
+| `runtimeArgs` | string[] | `["--context", "desktop-linux"]` | Default none. Global flags the CLI needs *before* its subcommand, such as selecting a docker context or a remote daemon. They are inserted as `docker --context desktop-linux ps ...` |
+| `execArgs` | string[] | `["--env", "TERM=xterm-256color"]` | Default none. Extra flags for the `exec` call only, so they apply to commands run in the container but not to lookups |
+| `devcontainerPath` | string | `"/opt/homebrew/bin/devcontainer"` | Default `devcontainer`. The CLI used by `/devcontainer up` |
+| `upArgs` | string[] | `["--remove-existing-container"]` | Default none. Extra flags for `devcontainer up` |
+| `hostCommands` | string[] | `["tuicr", "herdr"]` | Default none. Commands that must run on the host rather than in the container |
+| `tools` | string[] | `["bash", "write", "edit"]` | Default all seven. Which built-ins to claim |
+| `userBash` | `"container"` \| `"host"` | `"host"` | Default `"container"`. Where `!` commands run |
+| `requireContainer` | boolean | `true` | Default `false`. Fail tool calls instead of falling back to the host when there is no container |
 
 Every key at once, for reference:
 
@@ -270,7 +275,7 @@ When there is no container to route into, tool calls run on the host. How you
 find out depends on when it happens.
 
 **No container when the session starts.** pi shows a startup warning, the footer
-reads `⧉ host · no devcontainer`, and tool calls run on the host from the start.
+reads `⚠ host · no devcontainer`, and tool calls run on the host from the start.
 
 **The container is lost mid-session.** The agent must not discover this by
 quietly running the next command somewhere else, so the first routed call that
@@ -278,7 +283,7 @@ finds the container gone:
 
 1. does not run, and reports why
 2. **ends the turn**, so the agent cannot continue on the host in the same breath
-3. warns, and switches the footer to `⧉ host · devcontainer stopped`
+3. warns, and switches the footer to `⚠ host · devcontainer stopped`
 
 Control is back with you at that point. Restart the container with
 `/devcontainer up`, or just carry on: you have been told, so continuing is your
@@ -385,7 +390,7 @@ picks `bash` or falls back to `sh`.
 - When no devcontainer is found, or its container is not running, tool calls
   fall back to the host instead of failing, unless `requireContainer` is set. This is never silent: pi shows a
   startup warning saying tool calls are running on the host, and the footer
-  shows `⧉ host · no devcontainer` or `⧉ host · devcontainer stopped` for the
+  shows `⚠ host · no devcontainer` or `⚠ host · devcontainer stopped` for the
   whole session. See [Status bar](#status-bar).
 - Commands run in the container as the user your `devcontainer.json` asks for:
   `remoteUser`, or `containerUser` if that is the one set. If that user does not
@@ -424,6 +429,7 @@ src/discovery.ts      devcontainer.json discovery, JSONC parsing
 src/config.ts         settings.json merging
 src/routing.ts        which commands escape to the host
 test/test-discovery.ts   unit tests, no container or pi packages needed
+test/test-docs.ts        checks this README against the code
 test/test-config.ts      settings merging and runtime/CLI arg wiring
 test/test-routing.ts     host-command matching and escape behaviour
 test/test-harness.ts     container operations against a real container
@@ -475,7 +481,7 @@ devenv test
 
 This runs the container-free checks first, then detects whether this
 repository's devcontainer is running. If it is, the full suite runs against it
-(197 tests). If not, the integration suites are skipped with a message rather
+(215 tests). If not, the integration suites are skipped with a message rather
 than failing, which is what makes the same command safe as the container's
 `updateContentCommand`. Set `PI_DEVCONTAINER_SKIP_INTEGRATION=1` to force the
 skip.

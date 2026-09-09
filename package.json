@@ -36,6 +36,6 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node test/test-discovery.ts && node test/test-config.ts && node test/test-security.ts && node test/test-routing.ts && node test/test-harness.ts && node test/test-escape.ts && node test/test-extension.ts container && node test/test-extension.ts disabled && node test/test-extension.ts strict && node test/test-extension.ts nested && node test/test-menu.ts"
+    "test": "node test/test-discovery.ts && node test/test-docs.ts && node test/test-config.ts && node test/test-security.ts && node test/test-routing.ts && node test/test-harness.ts && node test/test-escape.ts && node test/test-extension.ts container && node test/test-extension.ts disabled && node test/test-extension.ts strict && node test/test-extension.ts nested && node test/test-menu.ts"
   }
 }

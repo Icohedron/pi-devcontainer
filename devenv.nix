@@ -69,6 +69,8 @@
       cd "$DEVENV_ROOT"
       echo "==> discovery and JSONC unit tests"
       node test/test-discovery.ts
+      echo "==> documentation matches the code"
+      node test/test-docs.ts
       echo "==> config merge tests"
       node test/test-config.ts
       echo "==> host command security"
@@ -96,6 +98,7 @@
       pi-link-deps
       echo "==> unit tests"
       node test/test-discovery.ts
+      node test/test-docs.ts
       echo "==> config and runtime wiring"
       node test/test-config.ts
       echo "==> host command security"
