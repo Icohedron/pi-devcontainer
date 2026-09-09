@@ -475,7 +475,7 @@ devenv test
 
 This runs the container-free checks first, then detects whether this
 repository's devcontainer is running. If it is, the full suite runs against it
-(196 tests). If not, the integration suites are skipped with a message rather
+(197 tests). If not, the integration suites are skipped with a message rather
 than failing, which is what makes the same command safe as the container's
 `updateContentCommand`. Set `PI_DEVCONTAINER_SKIP_INTEGRATION=1` to force the
 skip.

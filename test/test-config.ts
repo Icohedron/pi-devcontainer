@@ -338,6 +338,26 @@ async function main(): Promise<void> {
 
 	console.log("\n--- robustness ---");
 
+	await test("up returns when the CLI exits, even if it leaves a child holding stdout", async () => {
+		// The reported stall: the log showed the container started, then nothing.
+		// Container tooling routinely leaves processes that inherit the pipes, so
+		// waiting for stdio to close can wait forever after the command is done.
+		const dir = mkdtempSync(path.join(tmpdir(), "dc-stall-"));
+		const shim = path.join(dir, "fake-devcontainer");
+		writeFileSync(shim, "#!/bin/sh\necho '{\"outcome\":\"success\"}'\nsleep 30 &\nexit 0\n");
+		chmodSync(shim, 0o755);
+		try {
+			const started = Date.now();
+			const result = await devcontainerUp("/tmp", { ...DEFAULT_CONFIG, devcontainerPath: shim });
+			const elapsed = Date.now() - started;
+			assert.ok(result.ok, "the command succeeded, so up must report success");
+			assert.ok(elapsed < 10_000, `up took ${elapsed}ms; it must not wait on a lingering child`);
+			assert.match(result.output, /outcome/, "output produced before exiting must still be captured");
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
 	await test("an unresponsive container CLI cannot hang detection", async () => {
 		const dir = mkdtempSync(path.join(tmpdir(), "dc-hang-"));
 		const hang = path.join(dir, "hangdocker");

@@ -29,6 +29,17 @@ const DEFAULT_RUNTIME_BINS = ["docker", "podman"];
  */
 const HOST_PROBE_TIMEOUT_MS = 15_000;
 
+/**
+ * How long to keep reading after a process has exited.
+ *
+ * Node's "close" event waits for stdio to reach EOF, which never happens if a
+ * grandchild inherited the pipes and outlived its parent. Container tooling
+ * leaves such processes behind routinely, so waiting for "close" alone can hang
+ * forever after the command has plainly finished. Settle on "exit" instead,
+ * after a short window to collect whatever is still buffered.
+ */
+const OUTPUT_DRAIN_MS = 250;
+
 export interface ContainerTarget {
 	runtime: RuntimeSpec;
 	/** Shell to run commands with: bash when present, otherwise sh */
@@ -94,10 +105,12 @@ function runHost(
 			}
 		};
 
+		let drain: NodeJS.Timeout | undefined;
 		const finish = (fn: () => void) => {
 			if (settled) return;
 			settled = true;
 			if (timer) clearTimeout(timer);
+			if (drain) clearTimeout(drain);
 			options.signal?.removeEventListener("abort", onAbort);
 			fn();
 		};
@@ -126,6 +139,11 @@ function runHost(
 			options.onOutput?.(chunk.toString());
 		});
 		child.on("error", (error) => finish(() => reject(error)));
+		// exit means the command itself is done; close waits for stdio that a
+		// lingering grandchild may hold open indefinitely.
+		child.on("exit", (code) => {
+			drain = setTimeout(() => finish(() => resolve({ stdout, stderr, code })), OUTPUT_DRAIN_MS);
+		});
 		child.on("close", (code) => finish(() => resolve({ stdout, stderr, code })));
 	});
 }
@@ -422,9 +440,18 @@ export function containerExec(
 		const onAbort = () => child.kill("SIGKILL");
 		signal?.addEventListener("abort", onAbort, { once: true });
 
+		let drain: NodeJS.Timeout | undefined;
+		let settled = false;
 		const cleanup = () => {
 			if (timer) clearTimeout(timer);
+			if (drain) clearTimeout(drain);
 			signal?.removeEventListener("abort", onAbort);
+		};
+		const settle = (fn: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			fn();
 		};
 
 		child.stdout.on("data", (chunk: Buffer) => {
@@ -442,8 +469,7 @@ export function containerExec(
 		});
 
 		child.on("error", (error) => {
-			cleanup();
-			reject(new Error(`Failed to run ${target.runtime.bin} exec: ${error.message}`));
+			settle(() => reject(new Error(`Failed to run ${target.runtime.bin} exec: ${error.message}`)));
 		});
 
 		if (input !== undefined) {
@@ -453,18 +479,27 @@ export function containerExec(
 			child.stdin.end(input);
 		}
 
-		child.on("close", (code) => {
-			cleanup();
-			if (signal?.aborted) {
-				reject(new Error("aborted"));
-				return;
-			}
-			if (timedOut) {
-				reject(new Error(`timeout:${timeout}`));
-				return;
-			}
-			resolve({ stdout: Buffer.concat(stdoutChunks), stderr, exitCode: stopped ? 0 : code });
+		const conclude = (code: number | null) =>
+			settle(() => {
+				if (signal?.aborted) {
+					reject(new Error("aborted"));
+					return;
+				}
+				if (timedOut) {
+					reject(new Error(`timeout:${timeout}`));
+					return;
+				}
+				resolve({ stdout: Buffer.concat(stdoutChunks), stderr, exitCode: stopped ? 0 : code });
+			});
+
+		// Guard, not a fix for anything observed: podman closes an exec stream
+		// when the command exits, even with something still running inside the
+		// container. A runtime that did not would hang the tool call forever,
+		// and bash has no timeout unless the model sets one.
+		child.on("exit", (code) => {
+			drain = setTimeout(() => conclude(code), OUTPUT_DRAIN_MS);
 		});
+		child.on("close", (code) => conclude(code));
 	});
 }
 
