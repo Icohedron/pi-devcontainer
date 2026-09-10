@@ -1,7 +1,8 @@
 # pi-devcontainer
 
 An extension for [pi](https://pi.dev). It sends the tool calls of pi into the
-devcontainer of your project. The tool calls do not run on the host.
+[devcontainer](https://containers.dev/) of your project. The tool calls do not
+run on the host.
 
 pi reads, writes and executes in the container that your project describes. The
 model sees the tools, the runtimes and the file system of that container. It
