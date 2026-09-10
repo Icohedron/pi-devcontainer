@@ -1,6 +1,6 @@
 {
   "name": "pi-devcontainer",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Route pi's built-in tool calls into your project's devcontainer",
   "license": "MIT",
   "type": "module",

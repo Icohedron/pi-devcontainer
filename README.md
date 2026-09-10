@@ -75,7 +75,7 @@ container has it, or `grep` if it does not. At detection, the extension executes
 ```bash
 pi install git:github.com/Icohedron/pi-devcontainer          # all projects
 pi install -l git:github.com/Icohedron/pi-devcontainer       # this project only
-pi install git:github.com/Icohedron/pi-devcontainer@v0.3.0   # one tag
+pi install git:github.com/Icohedron/pi-devcontainer@v0.4.0   # one tag
 ```
 
 To use the extension for one session only:
