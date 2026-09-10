@@ -319,9 +319,15 @@ export function createHostReadPolicy(options: HostReadPolicyOptions): HostReadPo
 
 	// A root that is itself excluded would be a hole in the rules, so drop it
 	// rather than trusting every lookup underneath it to notice.
-	const roots = dedupe(options.roots.map((root) => path.resolve(root))).filter(
+	const permitted = dedupe(options.roots.map((root) => path.resolve(root))).filter(
 		(root) => !agentDirDenial(agentDir, root) && ignoreVerdict(root, patterns) !== true,
 	);
+
+	// A root inside another root grants nothing, and pi hands over the directory
+	// of every skill it loaded: with the usual layout each one sits under
+	// <agent dir>/skills or <agent dir>/npm already. Dropping them keeps the
+	// list short enough to show in full, and keeps every lookup shorter.
+	const roots = permitted.filter((root) => !permitted.some((other) => other !== root && isInside(other, root)));
 
 	return {
 		roots,

@@ -745,10 +745,15 @@ export default function (pi: ExtensionAPI) {
 		return `up ${seconds}s`;
 	}
 
-	/** Detail rows rendered at the top of the menu. */
-	async function collectDetails(): Promise<Array<[string, string]>> {
+	/**
+	 * Detail rows rendered at the top of the menu.
+	 *
+	 * A value that is a list gets one line for each entry, so a long list is
+	 * readable in full instead of being cut off after the first entries.
+	 */
+	async function collectDetails(): Promise<Array<[string, string | string[]]>> {
 		const { devcontainer, target, runtimes } = state;
-		const rows: Array<[string, string]> = [];
+		const rows: Array<[string, string | string[]]> = [];
 
 		rows.push(["Tool calls", target && !state.disabled ? "routed into container" : "running on host"]);
 		rows.push(["Config", devcontainer?.configPath ?? "none found"]);
@@ -784,12 +789,8 @@ export default function (pi: ExtensionAPI) {
 		rows.push(["! commands", state.config.userBash === "host" ? "host" : "container"]);
 		rows.push(["Host reads", hostReadSummary() || "none"]);
 		// The roots decide what a pattern in unreadableHostPatterns is aimed at,
-		// so they are worth naming rather than summarising.
-		if (state.hostRead.roots.length > 0) {
-			const shown = state.hostRead.roots.slice(0, 3).join(", ");
-			const rest = state.hostRead.roots.length - 3;
-			rows.push(["Readable roots", rest > 0 ? `${shown} (+${rest} more)` : shown]);
-		}
+		// so all of them are named. A count with no names cannot be acted on.
+		if (state.hostRead.roots.length > 0) rows.push(["Readable roots", [...state.hostRead.roots]]);
 		const unrouted = ROUTABLE_TOOLS.filter((name) => !claimed.has(name));
 		if (unrouted.length > 0) rows.push(["On the host", unrouted.join(", ")]);
 		appendConfigRows(rows);
@@ -797,7 +798,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	/** Show which config sources are active and what they changed. */
-	function appendConfigRows(rows: Array<[string, string]>): void {
+	function appendConfigRows(rows: Array<[string, string | string[]]>): void {
 		if (state.configSources.length === 0) {
 			rows.push(["Config overrides", "none (defaults)"]);
 			return;
@@ -839,15 +840,28 @@ export default function (pi: ExtensionAPI) {
 		await ctx.ui.custom((tui, theme, _keybindings, done) => {
 			const labelWidth = Math.max(...rows.map(([label]) => label.length));
 
-			// One row per line: truncate long values instead of letting them wrap.
+			// One line for each value, rather than one line for each row: a list
+			// value gets a line each, under the label. Long values lose their
+			// middle, because the two ends of a path say more than its start.
+			const fit = (value: string, width: number): string => {
+				if (value.length <= width) return value;
+				if (width < 8) return `${value.slice(0, Math.max(0, width - 1))}…`;
+				const head = Math.ceil((width - 1) / 2);
+				const tail = width - 1 - head;
+				return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
+			};
+
 			const detailRows = {
 				render(width: number): string[] {
-					return rows.map(([label, value]) => {
-						const prefix = ` ${label.padEnd(labelWidth)}  `;
-						const available = Math.max(8, width - prefix.length - 1);
-						const shown = value.length > available ? `${value.slice(0, available - 1)}…` : value;
-						return `${theme.fg("muted", prefix)}${shown}`;
-					});
+					const lines: string[] = [];
+					for (const [label, value] of rows) {
+						const values = Array.isArray(value) ? value : [value];
+						for (const [index, entry] of values.entries()) {
+							const prefix = ` ${(index === 0 ? label : "").padEnd(labelWidth)}  `;
+							lines.push(`${theme.fg("muted", prefix)}${fit(entry, Math.max(8, width - prefix.length - 1))}`);
+						}
+					}
+					return lines;
 				},
 				invalidate() {},
 			};

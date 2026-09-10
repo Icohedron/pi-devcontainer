@@ -355,6 +355,28 @@ async function main(): Promise<void> {
 
 	console.log("\n--- pi's own resource locations ---");
 
+	await test("a root inside another root is dropped, because it grants nothing", () => {
+		// pi hands over the directory of each skill it loaded, and with the usual
+		// layout each one is already under <agent dir>/skills or <agent dir>/npm.
+		// Without this, ten skills mean ten roots that add nothing but noise.
+		const inNpm = path.join(agentDir, "npm", "node_modules", "pi-drawio", "skills", "drawio");
+		const policy = createHostReadPolicy({
+			roots: [skills, path.join(skills, "tuicr"), path.join(agentDir, "npm"), inNpm, path.join(home, "reference")],
+			agentDir,
+		});
+		assert.deepStrictEqual(policy.roots, [skills, path.join(agentDir, "npm"), path.join(home, "reference")]);
+		// What they made readable stays readable, through the parent root.
+		assert.strictEqual(policy.decide(path.join(skills, "tuicr", "SKILL.md")).verdict, "readable");
+		assert.strictEqual(policy.decide(path.join(inNpm, "SKILL.md")).verdict, "readable");
+	});
+
+	await test("a root that only looks like a child is kept", () => {
+		// Outside the agent directory, where the structural rule does not apply.
+		const reference = path.join(home, "reference");
+		const policy = createHostReadPolicy({ roots: [reference, `${reference}-other`], agentDir });
+		assert.deepStrictEqual(policy.roots, [reference, `${reference}-other`]);
+	});
+
 	await test("the defaults cover skills, extensions and installed packages", () => {
 		const roots = piResourceRoots({ agentDir, home, skillDirs: ["/nix/store/abc/skills/x"], extra: ["/pi/docs"] });
 		for (const name of AGENT_RESOURCE_DIRS) {

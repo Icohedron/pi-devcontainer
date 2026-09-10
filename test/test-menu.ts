@@ -147,6 +147,26 @@ async function main(): Promise<void> {
 		assert.match(initial, /Shell +bash · ripgrep: no \(using grep\)/);
 	});
 
+	await test("menu names every readable root, with no summary of the rest", () => {
+		// A count with no names cannot be acted on: the roots decide what a
+		// pattern in unreadableHostPatterns is aimed at.
+		assert.ok(!/\+\d+ more/.test(initial), "the menu must not hide roots behind a count");
+		assert.match(initial, /Readable roots +\/\S+/, "the first root is on the label line");
+
+		const lines = initial.split("\n");
+		const start = lines.findIndex((line) => line.includes("Readable roots"));
+		assert.ok(start >= 0, "the menu should have a Readable roots row");
+		// The rows that follow have no label, and each one is a path.
+		const roots = [lines[start].replace(/^.*Readable roots\s+/, "")];
+		for (let index = start + 1; index < lines.length; index++) {
+			const value = lines[index].replace(/^\s*\|?\s*/, "");
+			if (!value.startsWith("/")) break;
+			roots.push(value);
+		}
+		assert.ok(roots.length > 1, `each root should get its own line, found ${roots.length}`);
+		for (const root of roots) assert.match(root, /^\/\S/, `not a path: ${root}`);
+	});
+
 	await test("menu lists the routed tools", () => {
 		assert.match(initial, /Routed tools +read, write, edit, bash, grep, find, ls/);
 	});
