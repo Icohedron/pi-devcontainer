@@ -86,51 +86,104 @@ It decides three things:
 |---|---|
 | Which container is yours | Containers are matched on the `devcontainer.local_folder` and `devcontainer.config_file` labels, which hold exactly this path |
 | What `/devcontainer up` builds | It is passed as `--workspace-folder`, with `--config` for the configuration that was found, so the container is the one this project describes |
-| How paths translate | It is the host end of the mapping described below |
+| Where routed calls run | Its container equivalent is the working directory for routed tool calls, and what relative paths resolve against |
 
 The container end of the pair is read from the container itself: the bind mount
 whose source is the workspace folder, whose destination is the workspace path
 inside the container, normally `/workspaces/<folder name>`. It is read rather
 than assumed, so a `workspaceFolder` set in `devcontainer.json` is honoured. If
-no such mount is found, `/workspaces/<folder name>` is used as a fallback.
+no such mount is found — a devcontainer that clones into a volume, say —
+`/workspaces/<folder name>` is used as a fallback, and that is precisely the
+case where the container's files are *not* the host's; see [Paths](#paths).
 
 The `/devcontainer` menu shows both ends, and the session directory too when you
 started somewhere below the workspace folder.
 
 ### Paths
 
-The workspace exists under two names: `/home/me/app` on the host and, say,
-`/workspaces/app` inside the container. The extension translates between them so
-you and the model can use either.
+A path means what it says inside the container. Absolute paths are used as
+written, so `/etc/hosts` is the container's `/etc/hosts` — that is the point of
+routing — and relative paths resolve against the session's directory in the
+container, so `read src/a.ts` means what it does on the host.
 
-**Into the container.** Anything under the host workspace is rewritten to its
-container equivalent, so `read /home/me/app/src/a.ts` and `read src/a.ts` reach
-the same file. Any other absolute path is passed through untouched and therefore
-means the *container's* copy: `/etc/hosts` is the container's `/etc/hosts`, which
-is the point of routing. The one exception is the read-only window described in
-[Skills and extensions on the host](#skills-and-extensions-on-the-host), which
-covers pi's own resources and any `readableHostPaths` you add.
+Nothing is translated between the host and container spellings of the
+workspace. That is deliberate. Rewriting `/home/me/app/src/a.ts` to
+`/workspaces/app/src/a.ts` assumes the two are the same file, which holds only
+while the workspace is bind-mounted: a devcontainer that clones into a volume,
+or bakes its sources into the image, has no such mount, and the rewrite would
+then read and edit a *different copy* without saying so. A wrong answer that
+looks right is worse than an error.
 
-**Out to the host.** Only commands listed in `hostCommands` run on the host, and
-their arguments get the reverse treatment: a path under the container workspace
-becomes the host path, so `review-tool /workspaces/app/src/a.ts` opens the real
-file.
+So a host path is refused, with the container path in the message:
 
-That reverse direction is the one with an ambiguity worth knowing about. If your
-host genuinely has a directory at the container workspace path, an argument like
-`/workspaces/app/x` is valid on both sides and rewriting it would retarget a
-perfectly good host path. The rule is that reality wins: if the argument already
-exists on the host, it is used as given and no aliasing happens. Aliasing only
-fills in a path the host does not have.
+```
+/home/me/app/src/a.ts is a host path, and paths are container paths here.
+Use /workspaces/app/src/a.ts instead, or a path relative to /workspaces/app.
+```
 
-Paths outside the workspace are never rewritten in either direction, so there is
-nothing to collide with there.
+The one exception is the read-only window described in [Skills and extensions
+on the host](#skills-and-extensions-on-the-host), which covers pi's own
+resources and any `readableHostPaths` you add — those really are host paths,
+and they are not in the container at all.
+
+#### One spelling everywhere
+
+If you want a path to mean the same thing on both sides, mount the workspace at
+the same place it lives on the host:
+
+```jsonc
+// .devcontainer/devcontainer.json
+{
+  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+  "workspaceFolder": "${localWorkspaceFolder}"
+}
+```
+
+Then `/home/me/app/src/a.ts` is valid in both places because it is one path,
+not two that happen to be kept in step, and pasting a path from your shell into
+pi works without thinking about it. The startup notice, the status bar and the
+`/devcontainer` menu all show both paths, so it is easy to see which situation
+you are in.
+
+**Host commands.** Arguments to `hostCommands` are passed to the host program
+exactly as written, with no translation either. A tool like `review-tool` gets
+the string the model gave it, so the same-path mount above is what makes
+`review-tool /home/me/app/src/a.ts` work from a routed session.
+
+#### The session directory
 
 If you start pi in a subdirectory of the project, the devcontainer is still
-found by walking up, and routed tool calls run in that subdirectory's container
-equivalent, so relative paths mean what they do on the host. `/devcontainer up`
-always targets the directory holding the configuration, not the directory you
-happen to be in.
+found by walking up, and routed tool calls — and `!` commands — run in that
+subdirectory's container equivalent:
+
+| | |
+|---|---|
+| host project | `/home/me/app` |
+| mounted in the container at | `/workspaces/app` |
+| pi started in | `/home/me/app/services/api` |
+| routed calls run in | `/workspaces/app/services/api` |
+
+That way `!ls` lists the directory you are standing in, and `read a.ts` means
+the same file it would on the host. It is one directory, worked out once at
+startup and shown in the menu — the only host-to-container mapping left, and it
+exists so relative paths do not silently change meaning.
+
+It is checked rather than assumed. Mapping a subdirectory supposes the
+container holds the same tree, which is true of a bind mount and not of a
+devcontainer that clones into a volume. So the directory is probed once when the
+container is found, and if it is not there, routed calls run at the workspace
+root and the startup notice says so:
+
+```
+  session dir:       /workspaces/app/services/api is not in the container; running in /workspaces/app instead
+```
+
+Without that check the container runtime fails every call with `OCI runtime
+attempted to invoke a command that was not found`, which describes a missing
+program rather than a missing directory.
+
+`/devcontainer up` always targets the directory holding the configuration, not
+the directory you happen to be in.
 
 ### Skills and extensions on the host
 

@@ -147,24 +147,3 @@ export function planHostCommand(command: string, hostCommands: readonly string[]
 		reason: `only these exact commands may run on the host: ${allowed.join(", ")}`,
 	};
 }
-
-/**
- * Rewrite a container workspace path to its host equivalent, so a model that
- * learned the container path still addresses the right file on the host.
- *
- * Only paths under the container workspace are touched; everything else is
- * passed through. `existsOnHost` resolves the one ambiguous case: if the host
- * genuinely has a path at the container workspace location, that real path
- * wins over the alias.
- */
-export function toHostPath(
-	argument: string,
-	containerWorkspace: string,
-	hostWorkspace: string,
-	existsOnHost?: (candidate: string) => boolean,
-): string {
-	if (!containerWorkspace || containerWorkspace === hostWorkspace) return argument;
-	if (existsOnHost?.(argument)) return argument;
-	if (argument !== containerWorkspace && !argument.startsWith(`${containerWorkspace}/`)) return argument;
-	return hostWorkspace + argument.slice(containerWorkspace.length);
-}

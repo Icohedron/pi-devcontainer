@@ -14,7 +14,14 @@ import {
 	createReadTool,
 	createWriteTool,
 } from "@earendil-works/pi-coding-agent";
-import { containerExec, containerHasCommand, detectRuntimes, findRunningContainer } from "../src/container.ts";
+import {
+	containerExec,
+	containerHasCommand,
+	containerPathFor,
+	detectRuntimes,
+	findRunningContainer,
+	resolveSessionDirectory,
+} from "../src/container.ts";
 import { findDevcontainerConfig } from "../src/discovery.ts";
 import {
 	createContainerBashOps,
@@ -80,14 +87,23 @@ async function main(): Promise<void> {
 		assert.strictEqual(result.stdout.toString().trim(), target.user);
 	});
 
-	console.log("\n--- path mapping ---");
+	console.log("\n--- path resolution ---");
 
-	await test("maps a host absolute path into the container", () => {
-		assert.strictEqual(toContainerPath(target, `${PROJECT}/devenv.nix`), `${target.containerWorkspace}/devenv.nix`);
+	await test("an absolute path is taken as written, as a container path", () => {
+		assert.strictEqual(toContainerPath(target, "/etc/hostname"), "/etc/hostname");
 	});
 
-	await test("leaves container absolute paths untouched", () => {
-		assert.strictEqual(toContainerPath(target, "/etc/hostname"), "/etc/hostname");
+	await test("a host workspace path is not translated to the container workspace", () => {
+		// The two are the same file only when the workspace is bind-mounted.
+		// A devcontainer that clones into a volume, or bakes its sources into
+		// the image, has no such mount, and translating would then address a
+		// different copy without saying so. index.ts refuses these instead.
+		if (target.hostWorkspace === target.containerWorkspace) {
+			console.log("        (workspace is mounted at the same path, so there is nothing to translate)");
+			return;
+		}
+		assert.strictEqual(toContainerPath(target, `${PROJECT}/devenv.nix`), `${PROJECT}/devenv.nix`);
+		assert.strictEqual(toContainerPath(target, PROJECT), PROJECT);
 	});
 
 	await test("resolves relative paths against the container workspace", () => {
@@ -98,8 +114,38 @@ async function main(): Promise<void> {
 		assert.strictEqual(toContainerPath(target, "@devenv.nix"), `${target.containerWorkspace}/devenv.nix`);
 	});
 
-	await test("maps the workspace root itself", () => {
-		assert.strictEqual(toContainerPath(target, PROJECT), target.containerWorkspace);
+	console.log("\n--- the session directory ---");
+
+	await test("a subdirectory of the workspace maps to the same subdirectory in the container", async () => {
+		const started = path.join(target.hostWorkspace, "src");
+		const resolved = await resolveSessionDirectory(target, started);
+		assert.strictEqual(resolved.directory, containerPathFor(target, started));
+		assert.strictEqual(resolved.missing, undefined);
+
+		// And the container agrees, which is the part worth checking.
+		const result = await containerExec(target, ["bash", "-lc", "pwd"], { cwd: resolved.directory });
+		assert.strictEqual(result.stdout.toString().trim(), resolved.directory);
+	});
+
+	await test("a directory the container does not have falls back to the workspace root", async () => {
+		// The clone-in-volume case in miniature. Without this the runtime fails
+		// every call with "attempted to invoke a command that was not found",
+		// which names the wrong problem.
+		const started = path.join(target.hostWorkspace, "not-in-the-container");
+		const resolved = await resolveSessionDirectory(target, started);
+		assert.strictEqual(resolved.directory, target.containerWorkspace);
+		assert.strictEqual(resolved.missing, containerPathFor(target, started));
+
+		const result = await containerExec(target, ["bash", "-lc", "pwd"], { cwd: resolved.directory });
+		assert.strictEqual(result.exitCode, 0, "the fallback must actually run");
+	});
+
+	await test("the probe is what decides, not a guess about the mount", async () => {
+		const started = path.join(target.hostWorkspace, "src");
+		const denied = await resolveSessionDirectory(target, started, async () => false);
+		assert.strictEqual(denied.directory, target.containerWorkspace);
+		const allowed = await resolveSessionDirectory(target, started, async () => true);
+		assert.strictEqual(allowed.directory, containerPathFor(target, started));
 	});
 
 	console.log("\n--- routed tools ---");
@@ -142,9 +188,14 @@ async function main(): Promise<void> {
 		assert.match(textOf(result), /written-in-container/);
 	});
 
-	await test("read accepts a host absolute path", async () => {
-		const result = await readTool.execute("t", { path: path.join(SCRATCH, "hello.txt") }, undefined);
-		assert.match(textOf(result), /written-in-container/);
+	await test("read of a host absolute path does not silently find the container's copy", async () => {
+		// The extension refuses these with the container path in the message;
+		// at this layer the point is that nothing is redirected.
+		if (target.hostWorkspace === target.containerWorkspace) {
+			console.log("        (same path on both sides, so there is nothing to redirect)");
+			return;
+		}
+		await assert.rejects(() => readTool.execute("t", { path: path.join(SCRATCH, "hello.txt") }, undefined));
 	});
 
 	await test("read reports missing files as an error", async () => {

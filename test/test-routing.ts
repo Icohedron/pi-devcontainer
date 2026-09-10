@@ -8,12 +8,12 @@
  */
 
 import assert from "node:assert";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { detectRuntimes, findRunningContainer } from "../src/container.ts";
 import { findDevcontainerConfig } from "../src/discovery.ts";
-import { planHostCommand, toHostPath } from "../src/routing.ts";
+import { planHostCommand } from "../src/routing.ts";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 
@@ -37,35 +37,6 @@ function textOf(result: { content: Array<{ type: string; text?: string }> }): st
 }
 
 async function main(): Promise<void> {
-	console.log("\n--- container paths rewritten for host execution ---");
-
-	await test("rewrites the container workspace prefix to the host path", () => {
-		assert.strictEqual(toHostPath("/workspaces/app/src/a.ts", "/workspaces/app", "/home/me/app"), "/home/me/app/src/a.ts");
-		assert.strictEqual(toHostPath("/workspaces/app", "/workspaces/app", "/home/me/app"), "/home/me/app");
-	});
-
-	await test("a path the host really has keeps its own meaning", () => {
-		// The ambiguous case: the host also has something at /workspaces/app.
-		// Rewriting there would silently retarget a valid host path.
-		const hostHas = (candidate: string) => candidate.startsWith("/workspaces/app");
-		assert.strictEqual(
-			toHostPath("/workspaces/app/src/a.ts", "/workspaces/app", "/home/me/app", hostHas),
-			"/workspaces/app/src/a.ts",
-			"an existing host path must win over the alias",
-		);
-		// With no such path on the host, the alias applies as usual.
-		assert.strictEqual(
-			toHostPath("/workspaces/app/src/a.ts", "/workspaces/app", "/home/me/app", () => false),
-			"/home/me/app/src/a.ts",
-		);
-	});
-
-	await test("leaves unrelated paths, lookalikes and identical workspaces untouched", () => {
-		assert.strictEqual(toHostPath("/etc/hosts", "/workspaces/app", "/home/me/app"), "/etc/hosts");
-		assert.strictEqual(toHostPath("/workspaces/app-other/x", "/workspaces/app", "/home/me/app"), "/workspaces/app-other/x");
-		assert.strictEqual(toHostPath("/same/p", "/same/p", "/same/p"), "/same/p");
-	});
-
 	console.log("\n--- execution while routing is active ---");
 
 	const devcontainer = findDevcontainerConfig(REPO);
@@ -109,10 +80,9 @@ async function main(): Promise<void> {
 			const plan = planHostCommand(command, hostCommands);
 			if (plan.mode === "blocked") throw new Error(`Refused to run this on the host: ${plan.reason}.`);
 			if (plan.mode === "host") {
-				const argv = plan.argv.map((entry) =>
-					toHostPath(entry, target.containerWorkspace, target.hostWorkspace, existsSync),
-				);
-				const tool = createBashTool(target.hostWorkspace, { operations: createHostArgvOperations(argv) });
+				const tool = createBashTool(target.hostWorkspace, {
+					operations: createHostArgvOperations(plan.argv),
+				});
 				return tool.execute("t", { command }, undefined);
 			}
 			return containerBash.execute("t", { command }, undefined);
@@ -130,9 +100,13 @@ async function main(): Promise<void> {
 				assert.match(output, new RegExp(target.hostWorkspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 			});
 
-			await test("container workspace paths in arguments are rewritten to host paths", async () => {
+			await test("arguments are passed to the host exactly as written", async () => {
+				// No translation in either direction: a host command receives what
+				// it was given, so a path that means something on the host is the
+				// caller's job. Mounting the workspace at the same path on both
+				// sides is what makes one spelling work everywhere.
 				await run(`${toolName} ${target.containerWorkspace}/README.md`, [toolName]);
-				assert.strictEqual(readFileSync(argvLog, "utf8").trim(), `${target.hostWorkspace}/README.md`);
+				assert.strictEqual(readFileSync(argvLog, "utf8").trim(), `${target.containerWorkspace}/README.md`);
 			});
 
 			await test("arguments reach the program verbatim, with no shell expansion", async () => {

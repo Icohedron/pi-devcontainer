@@ -1,8 +1,10 @@
 /**
  * Container-backed implementations of pi's pluggable tool operations.
  *
- * Every path crossing this boundary is translated from the host view to the
- * container view, so the model can use either form.
+ * Paths crossing this boundary are container paths. Absolute ones are used as
+ * written and relative ones resolve against the session's container directory;
+ * nothing is translated from the host, so a path always names the file the
+ * command will actually open.
  */
 
 import { spawn } from "node:child_process";
@@ -41,24 +43,26 @@ function toPosix(value: string): string {
 	return value.split(path.sep).join(path.posix.sep);
 }
 
-function isInsideHostPath(root: string, value: string): boolean {
-	const relativePath = path.relative(root, value);
-	return relativePath === "" || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath));
-}
-
-/** Translate a host or container path into an absolute container path. */
+/**
+ * Resolve a tool's path argument to an absolute container path.
+ *
+ * An absolute path is taken as written: it means the container's copy, the
+ * same as `/etc/hosts` does. There is deliberately no translation of host
+ * workspace paths, because it cannot be done honestly — a devcontainer that
+ * clones into a volume, or bakes its sources into the image, has no bind mount
+ * back to the host, so rewriting `/home/me/app/x` to `/workspaces/app/x` would
+ * silently address a different copy of the file. Mount the workspace at the
+ * same path on both sides if you want one spelling to work everywhere.
+ *
+ * Relative paths resolve against the session's directory in the container,
+ * which is what makes `read src/a.ts` mean what it does on the host.
+ */
 export function toContainerPath(target: ContainerTarget, inputPath: string, base?: string): string {
 	const root = base ?? target.containerWorkspace;
 	const trimmed = stripAtPrefix(inputPath.trim());
 	if (!trimmed) return root;
 
 	if (path.isAbsolute(trimmed) || path.posix.isAbsolute(toPosix(trimmed))) {
-		if (isInsideHostPath(target.hostWorkspace, trimmed)) {
-			const relative = path.relative(target.hostWorkspace, trimmed);
-			return relative
-				? path.posix.join(target.containerWorkspace, toPosix(relative))
-				: target.containerWorkspace;
-		}
 		return path.posix.resolve("/", toPosix(trimmed));
 	}
 	return path.posix.resolve(root, toPosix(trimmed));
@@ -214,10 +218,22 @@ export function createContainerFindOps(target: ContainerTarget): FindOperations 
  */
 const FORWARDED_ENV = ["PI_SESSION_ID", "PI_PROVIDER", "PI_MODEL", "PI_REASONING_LEVEL"];
 
-export function createContainerBashOps(target: ContainerTarget, shell: string): BashOperations {
+/**
+ * Shell operations that run in the container.
+ *
+ * The container directory is passed in rather than derived from the `cwd` pi
+ * supplies: for the routed bash tool that value is already a container path,
+ * but for `!` commands it is pi's own host working directory, and translating
+ * host paths is exactly what this extension no longer does. The session's
+ * container directory is worked out once, at startup.
+ */
+export function createContainerBashOps(
+	target: ContainerTarget,
+	shell: string,
+	containerCwd: string = target.containerWorkspace,
+): BashOperations {
 	return {
-		exec: async (command, cwd, { onData, signal, timeout, env }) => {
-			const containerCwd = toContainerPath(target, cwd);
+		exec: async (command, _cwd, { onData, signal, timeout, env }) => {
 			const envArgs: string[] = [];
 			if (env) {
 				for (const key of FORWARDED_ENV) {

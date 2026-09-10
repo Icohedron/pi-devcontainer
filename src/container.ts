@@ -527,6 +527,54 @@ export async function containerHasCommand(target: ContainerTarget, command: stri
 	}
 }
 
+/**
+ * The container path for a host path inside the workspace.
+ *
+ * This is the only host-to-container mapping in the extension, and it is used
+ * for two things: working out the session's directory once at startup, and
+ * telling the model the container path when it names a host one. Tool calls
+ * are never rewritten with it — see toContainerPath in operations.ts.
+ */
+export function containerPathFor(target: ContainerTarget, hostPath: string): string {
+	if (target.hostWorkspace === target.containerWorkspace) return hostPath;
+	const relative = path.relative(target.hostWorkspace, hostPath);
+	if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) return target.containerWorkspace;
+	return path.posix.join(target.containerWorkspace, relative.split(path.sep).join(path.posix.sep));
+}
+
+export interface SessionDirectory {
+	/** Where routed tool calls and ! commands run. */
+	directory: string;
+	/** The mapped directory, when it turned out not to exist in the container. */
+	missing?: string;
+}
+
+/**
+ * Decide the container directory routed calls run in, and check it is there.
+ *
+ * Mapping the session directory assumes the container has the same subtree,
+ * which is true for a bind-mounted workspace and not for a devcontainer that
+ * clones into a volume or bakes its sources into the image. Left unchecked,
+ * every routed call would fail with the runtime's own wording for a missing
+ * working directory — "OCI runtime attempted to invoke a command that was not
+ * found" — which reads like a missing program. One probe at startup turns that
+ * into a single, accurate warning, and the workspace root is used instead.
+ */
+export async function resolveSessionDirectory(
+	target: ContainerTarget,
+	localCwd: string,
+	probe: (directory: string) => Promise<boolean> = async (directory) => {
+		const result = await containerExec(target, ["test", "-d", directory]).catch(() => undefined);
+		return result?.exitCode === 0;
+	},
+): Promise<SessionDirectory> {
+	const mapped = containerPathFor(target, localCwd);
+	if (mapped === target.containerWorkspace) return { directory: mapped };
+	return (await probe(mapped))
+		? { directory: mapped }
+		: { directory: target.containerWorkspace, missing: mapped };
+}
+
 /** Start a stopped devcontainer using the devcontainer CLI. */
 export async function devcontainerUp(
 	workspaceFolder: string,

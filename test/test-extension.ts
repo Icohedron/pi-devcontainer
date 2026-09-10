@@ -460,12 +460,13 @@ async function main(): Promise<void> {
 			assert.match(textOf(result), /marker\.txt/);
 		});
 
-		await test("the model is told the session directory", async () => {
+		await test("the model is told the session directory, and that paths are container paths", async () => {
 			const [result] = await emit("before_agent_start", {
 				systemPrompt: `Current working directory: ${process.cwd()}`,
 			});
 			assert.ok(result.systemPrompt.includes(`Current working directory: ${expected}`), result.systemPrompt);
-			assert.match(result.systemPrompt, new RegExp(`mounted at ${WS}`));
+			assert.match(result.systemPrompt, /host paths are not translated/);
+			assert.ok(result.systemPrompt.includes(`the workspace is ${WS} here`), result.systemPrompt);
 		});
 
 		await test("/devcontainer up targets the config directory, not the session directory", async () => {
@@ -627,15 +628,28 @@ async function main(): Promise<void> {
 			// Worth stating: this window is a boundary, not a filter on the
 			// project. The container has the workspace bind-mounted, so its own
 			// .env reads exactly as it did before this existed.
-			const scratch = path.join(process.cwd(), ".dc-hostread-scratch");
-			mkdirSync(scratch, { recursive: true });
-			writeFileSync(path.join(scratch, ".env"), "WORKSPACE_MARKER=1\n");
+			const scratch = ".dc-hostread-scratch";
+			mkdirSync(path.join(process.cwd(), scratch), { recursive: true });
+			writeFileSync(path.join(process.cwd(), scratch, ".env"), "WORKSPACE_MARKER=1\n");
 			try {
-				const result = await read({ path: path.join(scratch, ".env") });
+				const result = await read({ path: `${scratch}/.env` });
 				assert.match(textOf(result), /WORKSPACE_MARKER/, "the container sees the project's own files");
 			} finally {
-				rmSync(scratch, { recursive: true, force: true });
+				rmSync(path.join(process.cwd(), scratch), { recursive: true, force: true });
 			}
+		});
+
+		await test("the host spelling of a workspace path is refused, with the container path", async () => {
+			// Not rewritten: only a bind mount makes the two the same file, and
+			// a clone-in-volume devcontainer is a case where they are not.
+			assert.ok(discovered);
+			const hostPath = path.join(process.cwd(), "README.md");
+			if (discovered.hostWorkspace === discovered.containerWorkspace) return;
+			await assert.rejects(read({ path: hostPath }), (error: Error) => {
+				assert.match(error.message, /is a host path/);
+				assert.ok(error.message.includes(`${WS}/README.md`), error.message);
+				return true;
+			});
 		});
 
 		await test("paths outside the window still mean the container's copy", async () => {

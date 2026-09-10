@@ -38,11 +38,14 @@ import {
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 import {
 	type ContainerTarget,
+	containerPathFor,
 	discoverContainer,
 	devcontainerUp,
 	getContainerDetails,
 	isContainerGoneError,
+	resolveSessionDirectory,
 	type RuntimeSpec,
+	type SessionDirectory,
 } from "./container.ts";
 import {
 	type ConfigSource,
@@ -60,7 +63,7 @@ import {
 	piResourceRoots,
 	resolveReadableRoots,
 } from "./hostpaths.ts";
-import { planHostCommand, toHostPath } from "./routing.ts";
+import { planHostCommand } from "./routing.ts";
 import {
 	createContainerBashOps,
 	createContainerEditOps,
@@ -70,7 +73,6 @@ import {
 	createContainerWriteOps,
 	createHostArgvOperations,
 	executeContainerGrep,
-	toContainerPath,
 } from "./operations.ts";
 
 const STATUS_KEY = "devcontainer";
@@ -97,6 +99,8 @@ interface RoutingState {
 	configuredRoots: string[];
 	/** Skill and extension paths named in the user's settings.json */
 	resourcePaths: string[];
+	/** Where routed calls run in the container, checked once at startup */
+	sessionDirectory: SessionDirectory | null;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -128,6 +132,7 @@ export default function (pi: ExtensionAPI) {
 		hostRead: createHostReadPolicy({ roots: [] }),
 		configuredRoots: [],
 		resourcePaths: [],
+		sessionDirectory: null,
 	};
 
 	let detecting: Promise<void> | undefined;
@@ -203,6 +208,9 @@ export default function (pi: ExtensionAPI) {
 		const { runtimes, target } = await discoverContainer(state.config, state.devcontainer, previous);
 		state.runtimes = runtimes;
 		state.target = target;
+		// One probe: the mapped session directory is only there if the container
+		// really holds the same tree, which a clone-in-volume devcontainer does not.
+		state.sessionDirectory = target ? await resolveSessionDirectory(target, localCwd) : null;
 		rebuildHostRead();
 	}
 
@@ -256,22 +264,24 @@ export default function (pi: ExtensionAPI) {
 	 * directory, so the routed ones must resolve against its container
 	 * equivalent. Using the workspace root instead would silently change what a
 	 * relative path means whenever pi is started in a subdirectory.
+	 *
+	 * This is the one host-to-container mapping left, and it is a single value
+	 * worked out once at startup and shown in the menu and the system prompt —
+	 * not a rewriting of paths the model or the user supplies.
 	 */
 	function containerCwd(target: ContainerTarget): string {
-		return toContainerPath(target, localCwd);
+		return state.sessionDirectory?.directory ?? containerPathFor(target, localCwd);
 	}
 
 	/**
-	 * Translate one argument of a host command.
+	 * The container path a host workspace path corresponds to. Diagnostics only.
 	 *
-	 * Container workspace paths are rewritten to their host equivalent so a
-	 * model that learned the container layout still names real files. An
-	 * argument that already exists on the host is left alone, so a host that
-	 * genuinely has a directory at the container workspace path keeps winning
-	 * over the alias.
+	 * Nothing is redirected: a tool call naming a host path is refused, with
+	 * this in the message, so the model reissues it against the file the command
+	 * would actually open.
 	 */
-	function hostArgument(target: ContainerTarget, argument: string): string {
-		return toHostPath(argument, target.containerWorkspace, target.hostWorkspace, existsSync);
+	function containerEquivalent(target: ContainerTarget, hostPath: string): string {
+		return containerPathFor(target, hostPath);
 	}
 
 	/**
@@ -292,6 +302,27 @@ export default function (pi: ExtensionAPI) {
 		if (!cleaned || !path.isAbsolute(cleaned)) return { verdict: "container" };
 		if (isInside(target.hostWorkspace, cleaned)) return { verdict: "container" };
 		return { ...state.hostRead.decide(cleaned), path: cleaned };
+	}
+
+	/**
+	 * Catch a path that names the workspace as the host spells it.
+	 *
+	 * Such a path is not rewritten — that would be a guess about whether the two
+	 * are the same file, and a devcontainer that clones into a volume or bakes
+	 * its sources into the image is a case where they are not. It is refused
+	 * with the container path instead, which the model can act on and a person
+	 * can read.
+	 */
+	function hostWorkspacePathError(target: ContainerTarget, params: unknown): string | undefined {
+		if (target.hostWorkspace === target.containerWorkspace) return undefined;
+		const raw = (params as { path?: unknown } | undefined)?.path;
+		if (typeof raw !== "string") return undefined;
+		const cleaned = raw.trim().replace(/^@/, "");
+		if (!cleaned || !path.isAbsolute(cleaned) || !isInside(target.hostWorkspace, cleaned)) return undefined;
+		return (
+			`${cleaned} is a host path, and paths are container paths here. ` +
+			`Use ${containerEquivalent(target, cleaned)} instead, or a path relative to ${containerCwd(target)}.`
+		);
 	}
 
 	/** The container to route into, or null when tools should run on the host. */
@@ -376,6 +407,12 @@ export default function (pi: ExtensionAPI) {
 					`  devcontainer.json: ${target.configPath}`,
 					`  container:         ${target.name}`,
 					`  workspace:         ${target.containerWorkspace} (host: ${target.hostWorkspace})`,
+					...(state.sessionDirectory?.missing
+						? [
+								`  session dir:       ${state.sessionDirectory.missing} is not in the container;` +
+									` running in ${target.containerWorkspace} instead`,
+							]
+						: []),
 					`  routed tools:      ${[...claimed].join(", ") || "none"}`,
 					...(hostReadSummary() ? [`  host reads:        ${hostReadSummary()}`] : []),
 					...(ROUTABLE_TOOLS.some((name) => !claimed.has(name))
@@ -465,15 +502,21 @@ export default function (pi: ExtensionAPI) {
 		if (!target) return;
 
 		const hostLine = `Current working directory: ${localCwd}`;
+		const sameSpelling = target.hostWorkspace === target.containerWorkspace;
 		let containerLine = [
 			`Current working directory: ${containerCwd(target)}`,
-			`(inside devcontainer "${target.name}"; host path ${target.hostWorkspace} is mounted at ${target.containerWorkspace})`,
+			sameSpelling
+				? `(inside devcontainer "${target.name}"; the workspace is at ${target.containerWorkspace} on both the host and in the container)`
+				: `(inside devcontainer "${target.name}"). Paths are container paths, and host paths are not` +
+					` translated: the workspace is ${target.containerWorkspace} here and ${target.hostWorkspace} on the` +
+					` host, so name files the container's way or relative to the working directory.`,
 		].join(" ");
 
 		if (state.config.hostCommands.length > 0) {
 			containerLine +=
 				` These exact commands run on the host instead, as a single program with plain` +
-				` arguments and no shell features: ${state.config.hostCommands.join(", ")}.`;
+				` arguments and no shell features: ${state.config.hostCommands.join(", ")}.` +
+				(sameSpelling ? "" : " Their arguments are passed to the host as written, so they need host paths.");
 		}
 
 		const hostReadLine = describeHostReads();
@@ -558,8 +601,8 @@ export default function (pi: ExtensionAPI) {
 				}
 				const operations =
 					plan.mode === "host"
-						? createHostArgvOperations(plan.argv.map((entry) => hostArgument(target, entry)))
-						: createContainerBashOps(target, target.shell);
+						? createHostArgvOperations(plan.argv)
+						: createContainerBashOps(target, target.shell, containerCwd(target));
 				// Host commands run where pi was started; routed ones in its
 				// container equivalent.
 				const cwd = plan.mode === "host" ? localCwd : containerCwd(target);
@@ -594,6 +637,11 @@ export default function (pi: ExtensionAPI) {
 					return tool.local.execute(id, params, signal, onUpdate);
 				}
 				try {
+					// A host spelling of a workspace path is refused rather than
+					// quietly redirected: the two are not always the same file.
+					const hostPath = hostWorkspacePathError(target, params);
+					if (hostPath) throw new Error(hostPath);
+
 					// A path on the host window is served from the host, read-only, and
 					// by pi's own tool: the container has no copy of it to route to.
 					const host = hostPathDecision(target, params);
@@ -669,10 +717,12 @@ export default function (pi: ExtensionAPI) {
 			};
 		}
 		if (plan.mode === "host") {
-			const argv = plan.argv.map((entry) => toHostPath(entry, target.containerWorkspace, target.hostWorkspace));
-			return { operations: createHostArgvOperations(argv) };
+			// Arguments are passed as written: a host command gets host paths, and
+			// the way to have one spelling work on both sides is to mount the
+			// workspace at the same path.
+			return { operations: createHostArgvOperations(plan.argv) };
 		}
-		return { operations: createContainerBashOps(target, target.shell) };
+		return { operations: createContainerBashOps(target, target.shell, containerCwd(target)) };
 	});
 
 	/** Human-readable uptime such as "up 3h 12m". */
@@ -718,6 +768,9 @@ export default function (pi: ExtensionAPI) {
 		rows.push(["Workspace", target.containerWorkspace]);
 		if (containerCwd(target) !== target.containerWorkspace) {
 			rows.push(["Session directory", containerCwd(target)]);
+		}
+		if (state.sessionDirectory?.missing) {
+			rows.push(["Session directory", `${state.sessionDirectory.missing} is not in the container`]);
 		}
 		rows.push(["Host path", target.hostWorkspace]);
 		rows.push(["User", target.user ?? "container default"]);
