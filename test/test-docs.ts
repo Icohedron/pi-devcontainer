@@ -98,7 +98,7 @@ async function main(): Promise<void> {
 		assert.ok(declared, "could not find the host-readable tool list in index.ts");
 		const names = [...declared[1].matchAll(/"([a-z]+)"/g)].map((match) => match[1]);
 		assert.deepStrictEqual(names, ["read", "ls", "find", "grep"]);
-		const row = readme.match(/\| What can look through it \|([^|]*)\|/);
+		const row = readme.match(/\| Tools that read host paths \|([^|]*)\|/);
 		assert.ok(row, "the README should say which tools can read host paths");
 		for (const name of names) {
 			assert.ok(row[1].includes(`\`${name}\``), `${name} is missing from the documented list`);
@@ -117,7 +117,7 @@ async function main(): Promise<void> {
 		}
 		assert.match(
 			readme,
-			/Nothing else is denied by name/,
+			/does not deny other files by name/,
 			"the README should be plain that there is no built-in secret-name filter",
 		);
 	});
@@ -129,7 +129,11 @@ async function main(): Promise<void> {
 			["hostCommands", "readableHostPaths", "unreadableHostPatterns"],
 			"pi's own skills are not a switch: a session told to use a skill it cannot open is broken, not safer",
 		);
-		assert.match(readme, /always readable/, "the README should say pi's own resources are not optional");
+		assert.match(
+			readme,
+			/always makes the resources of pi available/,
+			"the README should say pi's own resources are not optional",
+		);
 		assert.match(readme, /gitignore/i, "and how exclusions are written");
 	});
 

@@ -1,356 +1,11 @@
 # pi-devcontainer
 
-A [pi](https://pi.dev) extension that routes pi's built-in tool calls into your
-project's devcontainer instead of running them on the host.
-
-## Install
-
-```bash
-pi install git:github.com/Icohedron/pi-devcontainer          # global (all projects)
-pi install -l git:github.com/Icohedron/pi-devcontainer       # this project only
-pi install git:github.com/Icohedron/pi-devcontainer@v0.1.0   # pin a tag
-```
-
-Try it for a single run without installing:
-
-```bash
-pi -e git:github.com/Icohedron/pi-devcontainer
-```
-
-From a local checkout:
-
-```bash
-pi install -l /path/to/pi-devcontainer   # add to this project's settings
-pi -e /path/to/pi-devcontainer           # one run only
-```
-
-Remove with `pi remove git:github.com/Icohedron/pi-devcontainer` (add `-l` for
-project settings).
-
-## What it does
-
-On startup the extension walks up from the working directory and uses the first
-devcontainer configuration it finds. The first two are the locations the
-devcontainer CLI itself auto-discovers:
-
-1. `<dir>/.devcontainer/devcontainer.json`
-2. `<dir>/.devcontainer.json`
-
-As a fallback it also checks `<dir>/.devcontainer/<folder>/devcontainer.json`,
-the layout VS Code uses for repositories with several configurations. The CLI
-does not discover those on its own, so `/devcontainer up` passes `--config` with
-the path that was found.
-
-If the matching container is running, these tools execute inside it:
-
-| Tool | How it runs in the container |
-|------|------------------------------|
-| `read` | `cat` (byte-exact, so images still work) |
-| `write` | content piped over stdin, never through shell quoting |
-| `edit` | container-side read + write |
-| `bash` | `bash -lc` in the container workspace |
-| `ls` | `find -printf`, falling back to `ls -A` |
-| `find` | container `find`, globs matched in-process |
-| `grep` | container `rg` when present, otherwise `grep`; output formatted exactly like pi's built-in grep |
-
-`read`, `ls`, `find` and `grep` additionally see a small, read-only window onto
-the host, so pi's skills and extensions can still be opened from a routed
-session. See [Skills and extensions on the host](#skills-and-extensions-on-the-host).
-
-The system prompt's working directory is rewritten so the model knows it is
-working inside the container.
-
-`!` commands are routed too, since they also decide where work happens. Set
-`"userBash": "host"` to keep them on the host instead, with a normal host shell:
-
-```jsonc
-// ~/.pi/agent/settings.json
-{
-  "devcontainer": { "userBash": "host" }
-}
-```
-
-The `/devcontainer` menu shows which setting is in effect.
-
-### The workspace folder
-
-Everything hangs off one directory: the one holding the devcontainer
-configuration that was found by walking up. If pi starts in
-`/home/me/app/services/api` and the configuration lives at
-`/home/me/app/.devcontainer/devcontainer.json`, then `/home/me/app` is the
-workspace folder, whatever subdirectory you happened to start in.
-
-It decides three things:
-
-| | |
-|---|---|
-| Which container is yours | Containers are matched on the `devcontainer.local_folder` and `devcontainer.config_file` labels, which hold exactly this path |
-| What `/devcontainer up` builds | It is passed as `--workspace-folder`, with `--config` for the configuration that was found, so the container is the one this project describes |
-| Where routed calls run | Its container equivalent is the working directory for routed tool calls, and what relative paths resolve against |
-
-The container end of the pair is read from the container itself: the bind mount
-whose source is the workspace folder, whose destination is the workspace path
-inside the container, normally `/workspaces/<folder name>`. It is read rather
-than assumed, so a `workspaceFolder` set in `devcontainer.json` is honoured. If
-no such mount is found — a devcontainer that clones into a volume, say —
-`/workspaces/<folder name>` is used as a fallback, and that is precisely the
-case where the container's files are *not* the host's; see [Paths](#paths).
-
-The `/devcontainer` menu shows both ends, and the session directory too when you
-started somewhere below the workspace folder.
-
-### Paths
-
-A path means what it says inside the container. Absolute paths are used as
-written, so `/etc/hosts` is the container's `/etc/hosts` — that is the point of
-routing — and relative paths resolve against the session's directory in the
-container, so `read src/a.ts` means what it does on the host.
-
-Nothing is translated between the host and container spellings of the
-workspace. That is deliberate. Rewriting `/home/me/app/src/a.ts` to
-`/workspaces/app/src/a.ts` assumes the two are the same file, which holds only
-while the workspace is bind-mounted: a devcontainer that clones into a volume,
-or bakes its sources into the image, has no such mount, and the rewrite would
-then read and edit a *different copy* without saying so. A wrong answer that
-looks right is worse than an error.
-
-So a host path is refused, with the container path in the message:
-
-```
-/home/me/app/src/a.ts is a host path, and paths are container paths here.
-Use /workspaces/app/src/a.ts instead, or a path relative to /workspaces/app.
-```
-
-The one exception is the read-only window described in [Skills and extensions
-on the host](#skills-and-extensions-on-the-host), which covers pi's own
-resources and any `readableHostPaths` you add — those really are host paths,
-and they are not in the container at all.
-
-#### One spelling everywhere
-
-If you want a path to mean the same thing on both sides, mount the workspace at
-the same place it lives on the host:
-
-```jsonc
-// .devcontainer/devcontainer.json
-{
-  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
-  "workspaceFolder": "${localWorkspaceFolder}"
-}
-```
-
-Then `/home/me/app/src/a.ts` is valid in both places because it is one path,
-not two that happen to be kept in step, and pasting a path from your shell into
-pi works without thinking about it. The startup notice, the status bar and the
-`/devcontainer` menu all show both paths, so it is easy to see which situation
-you are in.
-
-**Host commands.** Arguments to `hostCommands` are passed to the host program
-exactly as written, with no translation either. A tool like `review-tool` gets
-the string the model gave it, so the same-path mount above is what makes
-`review-tool /home/me/app/src/a.ts` work from a routed session.
-
-#### The session directory
-
-If you start pi in a subdirectory of the project, the devcontainer is still
-found by walking up, and routed tool calls — and `!` commands — run in that
-subdirectory's container equivalent:
-
-| | |
-|---|---|
-| host project | `/home/me/app` |
-| mounted in the container at | `/workspaces/app` |
-| pi started in | `/home/me/app/services/api` |
-| routed calls run in | `/workspaces/app/services/api` |
-
-That way `!ls` lists the directory you are standing in, and `read a.ts` means
-the same file it would on the host. It is one directory, worked out once at
-startup and shown in the menu — the only host-to-container mapping left, and it
-exists so relative paths do not silently change meaning.
-
-It is checked rather than assumed. Mapping a subdirectory supposes the
-container holds the same tree, which is true of a bind mount and not of a
-devcontainer that clones into a volume. So the directory is probed once when the
-container is found, and if it is not there, routed calls run at the workspace
-root and the startup notice says so:
-
-```
-  session dir:       /workspaces/app/services/api is not in the container; running in /workspaces/app instead
-```
-
-Without that check the container runtime fails every call with `OCI runtime
-attempted to invoke a command that was not found`, which describes a missing
-program rather than a missing directory.
-
-`/devcontainer up` always targets the directory holding the configuration, not
-the directory you happen to be in.
-
-### Skills and extensions on the host
-
-pi's skills and extensions live on the host, in `~/.pi/agent/skills`,
-`~/.pi/agent/extensions`, the packages under `~/.pi/agent/npm` and `git`, and
-wherever else your settings point. The system prompt names them by *host* path:
-
-```
-<location>/home/me/.pi/agent/skills/tuicr/SKILL.md</location>
-```
-
-Route every tool call into the container and that path does not exist any more,
-so the model is told to use a skill it cannot open. The same goes for pi's own
-documentation, which the prompt points at by path.
-
-So those paths stay readable, through a deliberately narrow window:
-
-| | |
-|---|---|
-| What can look through it | `read`, `ls`, `find`, `grep` |
-| What cannot | `write`, `edit`, `bash`, `!` commands, `hostCommands` arguments |
-| What is behind it | pi's skills, extensions, installed packages, prompts, themes, tools and docs, plus any `readableHostPaths` you add |
-
-It is read-only because nothing writes through it: `write`, `edit` and `bash`
-have no host code path at all, and a write aimed at one of these paths is
-refused rather than quietly landing somewhere. Anything not behind the window
-keeps meaning the container's copy, exactly as before, and paths inside the
-workspace are always routed since the container is already looking at the same
-files.
-
-pi's own resources are not a setting. A skill the prompt names is a skill the
-model is told to open, so a switch for this would only produce sessions that
-are instructed to do something they cannot do. It would protect nothing either:
-what is behind the window by default is the skills, extensions and packages you
-installed — source and Markdown — while pi's credentials are excluded
-structurally, below. If you do not want skills read, do not load them; that is
-what pi's `--no-skills` is for.
-
-One consequence worth stating: extension and skill *source* becomes readable,
-so an API key hardcoded in your own extension is visible to a routed session
-just as it already is to an unrouted one. Keep keys in the environment.
-
-#### Other host paths
-
-`readableHostPaths` adds your own, with the same read-only rules. Add only what
-you mean to share; the roots are the boundary, and nothing inside one is second
-guessed:
-
-```jsonc
-// ~/.pi/agent/settings.json
-{
-  "devcontainer": {
-    "readableHostPaths": ["~/reference", "/opt/design-docs"]
-  }
-}
-```
-
-Entries may use `~`, may be files or directories, and are resolved against the
-directory pi started in when relative. Entries inside the workspace are skipped:
-the container has them already.
-
-#### What is never behind it
-
-One rule is built in, and it is structural rather than a guess: **pi's agent
-directory is readable only in `skills`, `extensions`, `npm`, `git`, `prompts`,
-`themes` and `tools`.** `auth.json`, `settings.json` (MCP servers carry keys),
-`models-store.json`, `sessions/` and everything else beside them are refused at
-any root, whatever `unreadableHostPatterns` says, including through a symlink.
-These are pi's own files in a fixed layout, so no guessing is involved.
-
-Nothing else is denied by name. A root is the boundary: this extension does not
-ship a list of names that look like secrets, because such a list is wrong about
-ordinary files — npm packages ship `generate_secret.d.ts`, skills ship
-`api-keys.md` — and incomplete about real ones, since a key can live in a file
-called anything. The dangerous part would be the feeling of safety it gives to
-a root that should not have been added.
-
-#### Keeping things out, gitignore style
-
-`unreadableHostPatterns` takes gitignore syntax: `!` puts something back, a
-trailing `/` names a directory, and **the last matching entry wins**. Comments
-are the JSONC `//` ones, as everywhere else in `settings.json`; an entry that
-begins with `#` is skipped as well, so a block pasted out of a `.gitignore`
-works as it stands.
-
-What a pattern is matched against is the part worth being precise about, since
-the window has many roots at once — `~/.pi/agent/skills`, `~/.pi/agent/npm` and
-each of the others are separate roots, so "relative to the root" would make one
-list mean different things in different places. It is simpler than that:
-
-| Pattern | Excludes a path when | Example |
-|---------|----------------------|---------|
-| no slash | one of its components is that name | `id_rsa`, `*.pem`, `secrets/` |
-| contains a slash | the absolute path **ends with** it, or is inside something that does | `extensions/pi-foo/config.json` |
-| begins with `/` or `~/` | the absolute path **is** it, or is inside it | `~/work/keys` |
-
-Components are matched whole: a slashed pattern lines up with the end of the
-path at a `/`, never mid-name. So
-`/home/me/.pi/agent/extensions/pi-foo/config.json` is excluded by any of
-`config.json`, `*.json`, `pi-foo/`, `extensions/pi-foo/config.json` or
-`~/.pi/agent/extensions`, and is not excluded by `agent/config.json`, which the
-path does not end with.
-
-You therefore write a path the way it reads on disk, and never work out which
-root something fell under. Two further differences from git, both deliberate:
-matching is case-insensitive, so `ID_RSA` cannot slip past a rule for `id_rsa`;
-and `*` matches dot-prefixed names, so `*.env` excludes `.env` — most glob
-implementations do neither, and both would be silent holes here.
-
-Exclusions are checked against the symlink destination too.
-
-```jsonc
-// ~/.pi/agent/settings.json
-{
-  "devcontainer": {
-    "readableHostPaths": ["~"],
-    "unreadableHostPatterns": [
-      ".ssh/", ".gnupg/", ".aws/", ".kube/", ".docker/",
-      ".netrc", ".npmrc", ".git-credentials",
-      "*.env", ".env.*",
-      "*.pem", "*.key", "*.p12",
-      "secrets/",
-      "!certs/public.pem"      // put one back
-    ]
-  }
-}
-```
-
-Start narrow instead, and most of this is unnecessary: a root that contains
-only what you meant to share needs no exclusions at all.
-
-They apply everywhere the window looks, pi's own resource directories included.
-Another extension that keeps a config file beside itself, or a package that
-ships one, is excluded like anything else:
-
-```jsonc
-"unreadableHostPatterns": ["extensions/*/config.json", "npm/**/credentials.json"]
-```
-
-An extension that keeps state *directly* under `~/.pi/agent/` — a
-`my-extension/` directory beside `sessions/` and `auth.json` — needs no rule at
-all: the structural rule above already excludes everything there that is not one
-of pi's resource directories.
-
-`/devcontainer` lists the roots in effect, if you want to see what the window
-is currently showing.
-
-##### Not the workspace
-
-Patterns only narrow the host window, and the host window is only `read`, `ls`,
-`find` and `grep` looking outside the container, read-only. Workspace paths
-never enter it: they are routed like everything else in the project, and the
-container reads them from the same bind mount, so the project's own `.env`
-behaves as it always has. `bash` is routed too, unfiltered, which is why
-claiming otherwise would be theatre.
-
-Keeping the workspace out of the window is also what stops the agent — which
-can create files there and nowhere else on the host — from planting a symlink
-that points into it.
-
-Neither key can be set by a project's `.pi/settings.json`. A repository the
-agent can write to must not be able to choose what the agent may read on the
-host.
-
-## Startup message
-
-Routing active, shown as an ordinary notification:
+An extension for [pi](https://pi.dev). It sends the tool calls of pi into the
+devcontainer of your project. The tool calls do not run on the host.
+
+pi reads, writes and executes in the container that your project describes. The
+model sees the tools, the runtimes and the file system of that container. It
+does not see the host.
 
 ```
 ✓ All tool calls are being routed into the devcontainer.
@@ -361,41 +16,105 @@ Routing active, shown as an ordinary notification:
   host reads:        pi skills, extensions and docs (read-only)
 ```
 
-No devcontainer found. This is a **warning**, which pi renders in its warning
-style, and the wording is blunt because the consequence is:
+The status bar shows where the tool calls run for the full session:
+
+| Status bar | Color | Condition |
+|------------|-------|-----------|
+| `⧉ devcontainer: nifty_hopper` | green | The tool calls run in that container |
+| `⚠ host · devcontainer: nifty_hopper (off)` | yellow | A container is available, but the routing is off |
+| `⚠ host · devcontainer stopped` | yellow | There is a configuration, but no container in operation |
+| `⚠ host · no devcontainer` | yellow | There is no configuration |
+
+Green shows that the work is in a container. Yellow with a warning symbol shows
+that the work is on the host.
+
+## Contents
+
+- [Requirements](#requirements)
+- [Install](#install)
+- [Commands](#commands)
+- [The menu](#the-menu)
+- [Which tools run in the container](#which-tools-run-in-the-container)
+- [Which devcontainer the extension uses](#which-devcontainer-the-extension-uses)
+- [The workspace folder](#the-workspace-folder)
+- [Paths](#paths)
+- [Host paths](#host-paths)
+- [Host commands](#host-commands)
+- [Settings](#settings)
+- [Operation with no container](#operation-with-no-container)
+- [Operation with other extensions](#operation-with-other-extensions)
+- [Other conditions](#other-conditions)
+- [Disclaimer](#disclaimer)
+
+## Requirements
+
+**On the host**
+
+- `docker` or `podman`. The extension examines both, and uses the runtime that
+  has the container.
+- A container for the workspace that is in operation. The container must have
+  the `devcontainer.local_folder` and `devcontainer.config_file` labels. The
+  devcontainer tools write these labels when they start a container. VS Code,
+  the devcontainer CLI and `/devcontainer up` all write them.
+- The `devcontainer` CLI, but only for the `/devcontainer up` command.
+
+The last two items are independent. A container that VS Code starts agrees with
+the second item, and the CLI is not necessary. If you do not use
+`/devcontainer up`, you do not need the CLI.
+
+**In the container**
+
+A shell and the core commands. The extension uses `rg` for `grep` if the
+container has it, or `grep` if it does not. At detection, the extension executes
+`command -v rg` in the container one time. The same operation selects `bash` or
+`sh`.
+
+## Install
+
+```bash
+pi install git:github.com/Icohedron/pi-devcontainer          # all projects
+pi install -l git:github.com/Icohedron/pi-devcontainer       # this project only
+pi install git:github.com/Icohedron/pi-devcontainer@v0.1.0   # one tag
+```
+
+To use the extension for one session only:
+
+```bash
+pi -e git:github.com/Icohedron/pi-devcontainer
+```
+
+To use a local copy:
+
+```bash
+pi install -l /path/to/pi-devcontainer   # add to the settings of the project
+pi -e /path/to/pi-devcontainer           # one session only
+```
+
+To remove the extension, use `pi remove git:github.com/Icohedron/pi-devcontainer`.
+Add `-l` for the settings of the project.
+
+## Commands
 
 ```
-⚠ No devcontainer found. All tool calls are running on the host.
-  host workspace: /home/me/scratch
+/dc                Open the menu with the details and the control
+/dc on             Look again, and route the tool calls into the container
+/dc off            Run the tool calls on the host for this session
+/dc up             Start the devcontainer with the devcontainer CLI, then route into it
+/dc status         Show the routing. This command also operates with no user interface
+
+pi --no-devcontainer   Start with the routing off
 ```
 
-A devcontainer exists but its container is stopped (or no runtime is installed):
+`/dc` is the short name for `/devcontainer`. The two names take the same
+arguments. `container` and `host` are other spellings of `on` and `off`.
 
-```
-⚠ Devcontainer found, but its container is not running.
-All tool calls are running on the host.
-  devcontainer.json: /home/me/app/.devcontainer/devcontainer.json
-  Run /devcontainer up to start it and route tool calls into it.
-```
+In the `-p`, JSON and RPC modes, `/devcontainer` shows the status. It does not
+open the menu.
 
-## Status bar
+## The menu
 
-The footer always names the devcontainer that tool calls are routed through:
-
-| Footer | Style | Meaning |
-|--------|-------|---------|
-| `⧉ devcontainer: nifty_hopper` | green | Tool calls run in that container |
-| `⚠ host · devcontainer: nifty_hopper (off)` | yellow | Container available, routing toggled off |
-| `⚠ host · devcontainer stopped` | yellow | Config found, container not running |
-| `⚠ host · no devcontainer` | yellow | No config found |
-
-Green means the work is contained; a yellow warning sign means it is not. The
-footer is the thing to glance at, so the two states are meant to be
-distinguishable without reading them.
-
-## Menu
-
-Run `/devcontainer` with no argument to open a details panel with a routing toggle:
+`/devcontainer` with no argument opens a panel. The panel shows the details of
+the container and a control for the routing:
 
 ```
  Devcontainer
@@ -418,66 +137,404 @@ Run `/devcontainer` with no argument to open a details panel with a routing togg
    Enter/Space to change · Esc to cancel
 ```
 
-Toggling takes effect immediately — the next tool call runs on the host (or back
-in the container) and the status bar updates. The toggle lasts for the session;
-it is not written to disk. When no container is running, the toggle reads
-`unavailable` and the panel points at `/devcontainer up`.
+The panel also shows the session directory, the roots of the host paths and the
+settings that you changed, when they apply.
 
-## Command and flag
+A change of the control starts immediately. The next tool call runs in the new
+location, and the status bar changes. The change stays for the session only.
+The extension does not write it to a file. If there is no container in
+operation, the control shows `unavailable`, and the panel shows the
+`/devcontainer up` command.
+
+## Which tools run in the container
+
+| Tool | Operation in the container |
+|------|----------------------------|
+| `read` | `cat`. The bytes do not change, and images stay correct |
+| `write` | The extension sends the content on stdin. It does not use shell quotes |
+| `edit` | The extension reads the file in the container, then writes it |
+| `bash` | `bash -lc` in the directory of the session |
+| `ls` | `find -printf`. If that command fails, `ls -A` |
+| `find` | `find` in the container. The extension matches the globs in its own process |
+| `grep` | `rg` if the container has it, or `grep`. The output format is the same as the built-in `grep` of pi |
+
+pi tells the model its working directory in the system prompt. The system
+prompt is the text that pi sends to the model before your first message. The
+extension replaces the host directory in that text with the directory in the
+container. The model then knows where its tool calls run.
+
+`!` commands also go into the container. They run in the same directory as the
+routed tool calls. Refer to [The session directory](#the-session-directory).
+
+To run `!` commands on the host, set `"userBash": "host"`:
+
+```jsonc
+// ~/.pi/agent/settings.json
+{
+  "devcontainer": { "userBash": "host" }
+}
+```
+
+The `! commands` line of the [menu](#the-menu) shows the location that this
+setting selects.
+
+## Which devcontainer the extension uses
+
+At start, the extension looks for a devcontainer configuration. It starts in the
+working directory and moves up through the parent directories. In each
+directory, it uses the first configuration that it finds:
+
+1. `<dir>/.devcontainer/devcontainer.json`
+2. `<dir>/.devcontainer.json`
+3. `<dir>/.devcontainer/<folder>/devcontainer.json`
+
+The third location is the layout of VS Code for a project with more than one
+configuration. If there is more than one `<folder>`, the extension puts the
+names in alphabetical order and uses the first `<folder>` that contains a
+`devcontainer.json` file. To use a different configuration, start the container
+yourself, or move that configuration to `.devcontainer/devcontainer.json`.
+
+The devcontainer CLI finds the first two locations without help. It does not
+look in the subdirectories of `.devcontainer`. Thus `/devcontainer up` gives the
+CLI a `--config` option with the path of the configuration that the extension
+found. The CLI then builds the container for that configuration, and not for a
+different one.
+
+## The workspace folder
+
+The workspace folder is the directory that holds `.devcontainer`. It is not the
+`.devcontainer` directory. If the configuration is
+`/home/me/app/.devcontainer/devcontainer.json`, the workspace folder is
+`/home/me/app`. It stays `/home/me/app` if you start pi in
+`/home/me/app/services/api`.
+
+The workspace folder controls three things:
+
+| | |
+|---|---|
+| Which container the extension uses | The devcontainer tools write the workspace folder into the `devcontainer.local_folder` label of the container, and the path of the configuration into the `devcontainer.config_file` label. The extension examines the labels of each container that is in operation |
+| What `/devcontainer up` builds | The extension gives the workspace folder as `--workspace-folder`, and the configuration that it found as `--config` |
+| Where routed calls run | The same directory in the container is the working directory for routed tool calls |
+
+The extension also gets the path of the workspace in the container from these
+labels and mounts. It looks for the bind mount whose source is the workspace
+folder. The destination of that mount is the workspace path in the container,
+usually `/workspaces/<folder name>`.
+
+The extension reads this path from the container. It does not calculate the
+path. A `workspaceFolder` value in `devcontainer.json` stays correct.
+
+Some devcontainers have no bind mount from the workspace folder. A devcontainer
+that clones the project into a volume is one example. The extension then uses
+`/workspaces/<folder name>`, and the files in the container are a different copy
+of the project. Refer to [Paths](#paths).
+
+## Paths
+
+A path in a tool call is a path in the container. This rule applies to a path
+from the model, and to a path that you write in a message. The extension uses an
+absolute path without a change. `/etc/hosts` is the `/etc/hosts` file of the
+container. A relative path starts at the directory of the session in the
+container. `read src/a.ts` finds the same file as on the host.
+
+The extension does not translate a host path into a container path. The two
+paths are the same file only if a bind mount connects them. A devcontainer that
+clones the project into a volume has a different copy of each file.
+
+If a tool call has a host path, the extension refuses the call. The message
+gives the container path:
 
 ```
-/dc                Open the details menu with the routing toggle
-/dc on             Look again and route into the container
-/dc off            Run tool calls on the host for this session
-/dc up             Start the devcontainer (devcontainer CLI), then route into it
-/dc status         Print current routing (works in non-TUI modes)
-
-pi --no-devcontainer   Start with routing disabled
+/home/me/app/src/a.ts is a host path, and paths are container paths here.
+Use /workspaces/app/src/a.ts instead, or a path relative to /workspaces/app.
 ```
 
-`/dc` is short for `/devcontainer`; either name works, with the same arguments.
-`container` and `host` are accepted as longer spellings of `on` and `off`.
+The [host paths](#host-paths) that the model can read are the one exception.
+Those paths are not in the container.
 
-In non-TUI modes (`-p`, JSON, RPC) `/devcontainer` prints the status instead of
-opening the menu.
+### One path on the host and in the container
 
-## Configuration
+To use one path on both sides, mount the workspace at the same location as on
+the host:
 
-Optional. Without any settings the extension probes `docker` then `podman` and
-uses whichever one actually has the container.
+```jsonc
+// .devcontainer/devcontainer.json
+{
+  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+  "workspaceFolder": "${localWorkspaceFolder}"
+}
+```
 
-Settings live in pi's own `settings.json` under a top-level `devcontainer` key:
+`/home/me/app/src/a.ts` is then correct in both places, because it is one path.
+The startup message, the status bar and the `/devcontainer` menu show both
+paths.
 
-| Scope | File | What it may set |
-|-------|------|-----------------|
-| user | `~/.pi/agent/settings.json` | everything |
-| project | `<project>/.pi/settings.json` | `enabled` only, and only in a trusted project |
+### The session directory
 
-Most keys decide which binary runs on the host, and the model can write files in
-the workspace, so a project that could set them would be granting itself host
-execution. Projects may therefore only turn routing off; anything else in a
-project's settings is ignored with a warning naming the keys it skipped. Where a
-project does set `enabled`, it wins over the user value.
+If pi starts in a subdirectory of the project, the extension finds the
+devcontainer in a parent directory. Routed tool calls and `!` commands then run
+in the same subdirectory in the container:
 
-JSONC (comments, trailing commas) is accepted. Unknown keys and wrongly typed
-values are ignored with a warning rather than failing the session.
+| | |
+|---|---|
+| Project on the host | `/home/me/app` |
+| Mount in the container | `/workspaces/app` |
+| Start directory of pi | `/home/me/app/services/api` |
+| Directory of routed calls | `/workspaces/app/services/api` |
 
-| Key | Type | Example | Purpose |
-|-----|------|---------|---------|
-| `enabled` | boolean | `false` | Default `true`. Set `false` to stay on the host. The only key a project may set |
-| `runtime` | string | `"/usr/local/bin/docker"` | Default: probe `docker` then `podman`. Naming one skips the probe |
-| `runtimeArgs` | string[] | `["--context", "desktop-linux"]` | Default none. Global flags the CLI needs *before* its subcommand, such as selecting a docker context or a remote daemon. They are inserted as `docker --context desktop-linux ps ...` |
-| `execArgs` | string[] | `["--env", "TERM=xterm-256color"]` | Default none. Extra flags for the `exec` call only, so they apply to commands run in the container but not to lookups |
-| `devcontainerPath` | string | `"/opt/homebrew/bin/devcontainer"` | Default `devcontainer`. The CLI used by `/devcontainer up` |
-| `upArgs` | string[] | `["--remove-existing-container"]` | Default none. Extra flags for `devcontainer up` |
-| `hostCommands` | string[] | `["tuicr", "herdr"]` | Default none. Commands that must run on the host rather than in the container |
-| `readableHostPaths` | string[] | `["~/reference"]` | Default none. Extra host paths a routed session may read, on top of pi's own skills, extensions and docs, which are always readable. Read-only: only `read`, `ls`, `find` and `grep` see them |
-| `unreadableHostPatterns` | string[] | `["*.pem", "!public.pem"]` | Default none. gitignore-style entries for what must stay unreadable inside those paths: `!` puts something back, last match wins. pi's own credentials are excluded regardless |
-| `tools` | string[] | `["bash", "write", "edit"]` | Default all seven. Which built-ins to claim |
+`!ls` lists the directory that you started pi in. This directory is the only
+host path that the extension maps to a container path.
+
+The extension examines this directory one time, when it finds the container. If
+the container does not have the directory, routed calls run in the workspace
+folder. The startup message shows this condition:
+
+```
+  session dir:       /workspaces/app/services/api is not in the container; running in /workspaces/app instead
+```
+
+`/devcontainer up` always uses the directory that contains the configuration. It
+does not use the directory that you started pi in.
+
+## Host paths
+
+pi keeps its skills and extensions on the host. The system prompt gives the
+location of each skill as a host path:
+
+```
+<location>/home/me/.pi/agent/skills/tuicr/SKILL.md</location>
+```
+
+These paths are not in the container. The extension makes these host paths
+available:
+
+| Host path | Content |
+|-----------|---------|
+| `<agent dir>/skills` | The skills that you installed |
+| `<agent dir>/extensions` | The extensions that you installed |
+| `<agent dir>/npm`, `<agent dir>/git` | The packages that `pi install` writes |
+| `<agent dir>/prompts`, `<agent dir>/themes`, `<agent dir>/tools` | The other resources of pi |
+| `~/.agents/skills` | The skills that you share with other agents |
+| The directory of each skill that pi loaded | Skills in other locations, from the `skills` setting, a package, or `--skill` |
+| The `skills` and `extensions` paths in your `settings.json` | Resources in other locations |
+| The documentation and examples of pi | The files that the system prompt gives a path to |
+| The paths in `readableHostPaths` | Refer to [More host paths](#more-host-paths) |
+
+`<agent dir>` is `~/.pi/agent` in a usual installation. The
+`PI_CODING_AGENT_DIR` environment variable changes it. The extension gets the
+location from pi. It also gets the directory of each skill from pi. It finds a
+skill in a location that is not in this table.
+
+These tools read the host paths:
+
+| | |
+|---|---|
+| Tools that read host paths | `read`, `ls`, `find`, `grep` |
+| Tools that do not | `write`, `edit`, `bash`, `!` commands, `hostCommands` arguments |
+
+Access is read-only. `write`, `edit` and `bash` have no connection to the host
+file system. If `write` or `edit` gets one of these paths, the extension refuses
+the call.
+
+The extension always makes the resources of pi available. If the model must not
+read the skills, do not load them. Use the `--no-skills` option of pi.
+
+The source files of your extensions and skills become available to the model. Do
+not put keys in those files. Put the keys in environment variables.
+
+### More host paths
+
+`readableHostPaths` makes more host paths available, with the same read-only
+rules:
+
+```jsonc
+// ~/.pi/agent/settings.json
+{
+  "devcontainer": {
+    "readableHostPaths": ["~/reference", "/opt/design-docs"]
+  }
+}
+```
+
+An entry can start with `~`, and can be a file or a directory. A relative entry
+starts at the directory that you started pi in. The extension ignores an entry
+that is in the workspace, because the container has those files.
+
+### Paths that stay unavailable
+
+The extension has one rule of its own, the **agent directory rule**. The agent
+directory of pi is available only in `skills`, `extensions`, `npm`, `git`,
+`prompts`, `themes` and `tools`. The other files in that directory stay
+unavailable at all roots, with all settings, and through a symbolic link. These
+files include `auth.json`, `settings.json`, `models-store.json` and `sessions/`.
+
+The extension does not deny other files by name. It has no list of the usual
+names of credentials. Such a list denies usual files, and it does not find all
+credentials. Make each root as small as possible, or write the rules that you
+need.
+
+### Exclusions
+
+`unreadableHostPatterns` holds gitignore patterns for the paths that must stay
+unavailable. `!` puts a path back. The last pattern that agrees with a path
+controls the result.
+
+| Pattern | The extension denies a path if | Example |
+|---------|--------------------------------|---------|
+| a name with no slash | one component of the path is that name | `id_rsa`, `*.pem` |
+| a name with `/` at the end | one component is that directory. The files in it are also unavailable | `secrets/` |
+| a pattern with a slash in it | the absolute path ends with the pattern, or is in a directory that ends with it | `extensions/pi-foo/config.json` |
+| a pattern with `/` or `~/` at the start | the absolute path is the pattern, or is in it | `~/work/keys` |
+
+These wildcards are available in one component:
+
+| Wildcard | Function |
+|----------|----------|
+| `*` | 0 or more characters, but not `/` |
+| `?` | 1 character, but not `/` |
+| `[abc]` | 1 character from the set. `[!abc]` is 1 character that is not in the set |
+| `**` | 0 or more directories, in a pattern that has a slash in it |
+
+The extension compares full components. `id_rsa` denies a file with the name
+`id_rsa`. It does not deny `id_rsa.pub` or `old_id_rsa_backup`. A pattern with a
+slash agrees with the end of the path at a `/`. It does not agree in the middle
+of a name. For example, the extension denies
+`/home/me/.pi/agent/extensions/pi-foo/config.json` for `config.json`, `*.json`,
+`pi-foo/`, `extensions/pi-foo/config.json` or `~/.pi/agent/extensions`. It does
+not deny that file for `agent/config.json`.
+
+The extension resolves each path before it applies the patterns. A path has no
+`.` or `..` component at that time. A pattern can start with `./`, and
+`./secrets` is the same pattern as `secrets`.
+
+There are two differences from git. The comparison ignores letter case. A rule
+for `id_rsa` also denies `ID_RSA`. A `*` also agrees with a name that starts
+with a dot. `*.env` denies `.env`.
+
+The extension also compares the destination of a symbolic link.
+
+```jsonc
+// ~/.pi/agent/settings.json
+{
+  "devcontainer": {
+    "readableHostPaths": ["~"],
+    "unreadableHostPatterns": [
+      ".ssh/", ".gnupg/", ".aws/", ".kube/", ".docker/",
+      ".netrc", ".npmrc", ".git-credentials",
+      "*.env", ".env.*",
+      "*.pem", "*.key", "*.p12",
+      "secrets/",
+      "!certs/public.pem"
+    ]
+  }
+}
+```
+
+The extension ignores an entry that starts with `#`. You can copy a block of
+lines from a `.gitignore` file.
+
+The patterns apply to all available paths, and include the resource directories
+of pi. An extension that keeps a configuration file with its own files is one
+example:
+
+```jsonc
+"unreadableHostPatterns": ["extensions/*/config.json", "npm/**/credentials.json"]
+```
+
+An extension that keeps its data directly in `~/.pi/agent/` needs no pattern.
+The agent directory rule above already denies all files in that directory that
+are not resource directories.
+
+The `/devcontainer` menu shows the roots that the extension uses.
+
+### The workspace
+
+The patterns apply only to host paths. A workspace path is a container path, and
+the extension routes it. The container reads the file from the same bind mount.
+The `.env` file of your project is available, as before. The `bash` tool also
+reads it.
+
+The extension does not follow a symbolic link from the workspace to a host path.
+The container gets the path, and the container resolves the link with its own
+file system. A symbolic link in the workspace cannot make a host file
+available.
+
+A project cannot set `readableHostPaths` or `unreadableHostPatterns` in its
+`.pi/settings.json` file. The extension ignores these keys and gives a warning.
+Refer to [Settings](#settings).
+
+## Host commands
+
+Only the commands in `hostCommands` run on the host:
+
+```jsonc
+// ~/.pi/agent/settings.json
+{
+  "devcontainer": { "hostCommands": ["tuicr", "herdr"] }
+}
+```
+
+The extension sends the arguments to the host program as the model writes them.
+It does not change the paths. To use one path on both sides, mount the workspace
+at the same location. Refer to
+[One path on the host and in the container](#one-path-on-the-host-and-in-the-container).
+
+The extension executes the command directly. There is no shell. It runs a
+command on the host only if the command has this form:
+
+- The first word is the same as an entry in `hostCommands`. The same file name
+  is not enough. `/tmp/evil/herdr` is not the same as `herdr`.
+- There is no `VAR=value` before the name of the program.
+- Outside of quotes, there is no `;` `&` `|` `<` `>` `$` `` ` `` `\` `(` `)`
+  `{` `}` and no new line.
+- Inside of double quotes, there is no `$`, `` ` `` or `\`. The other characters
+  are permitted. `herdr "a;b"` gives the program one argument, `a;b`.
+- Inside of single quotes, all characters are permitted. `herdr '$HOME'` gives
+  the program the 5 characters `$HOME`.
+- Each quote has a second quote that closes it.
+
+If the first word is not in `hostCommands`, the command runs in the container.
+If the first word is in `hostCommands`, but the command does not have the form
+above, the extension refuses the command and gives the reason. It does not run
+the command in the container.
+
+## Settings
+
+The settings are optional. If there are no settings, the extension examines
+`docker`, then `podman`. It uses the runtime that has the container.
+
+The settings are in the `devcontainer` key of the settings files of pi:
+
+| Scope | File | Permitted keys |
+|-------|------|----------------|
+| user | `~/.pi/agent/settings.json` | all keys |
+| project | `<project>/.pi/settings.json` | `enabled` only, and only in a project that you trust |
+
+Most keys control which program runs on the host, or which files the model can
+read. The model can write the files of a project. A project can set
+`enabled` only. If a project sets a different key, the extension ignores that
+key and gives a warning with its name. The `enabled` value of a project replaces
+the value of the user.
+
+The files are JSONC. Comments and a comma at the end of a list are permitted.
+The extension ignores an unknown key or an incorrect value, and gives a warning.
+
+| Key | Type | Example | Function |
+|-----|------|---------|----------|
+| `enabled` | boolean | `false` | Default `true`. Set `false` to run the tool calls on the host. The only key that a project can set |
+| `runtime` | string | `"/usr/local/bin/docker"` | Default: examine `docker`, then `podman`. A value stops the examination |
+| `runtimeArgs` | string[] | `["--context", "desktop-linux"]` | Default none. Options for the runtime before the subcommand, as in `docker --context desktop-linux ps` |
+| `execArgs` | string[] | `["--env", "TERM=xterm-256color"]` | Default none. More options for the `exec` command only |
+| `devcontainerPath` | string | `"/opt/homebrew/bin/devcontainer"` | Default `devcontainer`. The CLI that `/devcontainer up` uses |
+| `upArgs` | string[] | `["--remove-existing-container"]` | Default none. More options for `devcontainer up` |
+| `hostCommands` | string[] | `["tuicr", "herdr"]` | Default none. The commands that run on the host |
+| `readableHostPaths` | string[] | `["~/reference"]` | Default none. More host paths that the model can read. The skills, extensions and documentation of pi are always available |
+| `unreadableHostPatterns` | string[] | `["*.pem", "!public.pem"]` | Default none. gitignore patterns for the host paths that stay unavailable. The credentials of pi stay unavailable in all conditions |
+| `tools` | string[] | `["bash", "write", "edit"]` | Default all seven. The built-in tools that the extension controls |
 | `userBash` | `"container"` \| `"host"` | `"host"` | Default `"container"`. Where `!` commands run |
-| `requireContainer` | boolean | `true` | Default `false`. Fail tool calls instead of falling back to the host when there is no container |
+| `requireContainer` | boolean | `true` | Default `false`. Set `true` to make the tool calls fail if there is no container |
 
-Every key at once, for reference:
+All keys together:
 
 ```jsonc
 // ~/.pi/agent/settings.json
@@ -499,73 +556,77 @@ Every key at once, for reference:
 }
 ```
 
-### Falling back to the host
+## Operation with no container
 
-When there is no container to route into, tool calls run on the host. How you
-find out depends on when it happens.
+If there is no container, the tool calls run on the host. `requireContainer`
+changes this behavior.
 
-**No container when the session starts.** pi shows a startup warning, the footer
-reads `⚠ host · no devcontainer`, and tool calls run on the host from the start.
+**At the start of the session.** pi shows a warning, and the status bar shows
+the condition for the full session:
 
-**The container is lost mid-session.** The agent must not discover this by
-quietly running the next command somewhere else, so the first routed call that
-finds the container gone:
+```
+⚠ No devcontainer found. All tool calls are running on the host.
+  host workspace: /home/me/scratch
+```
 
-1. does not run, and reports why
-2. **ends the turn**, so the agent cannot continue on the host in the same breath
-3. warns, and switches the footer to `⚠ host · devcontainer stopped`
+If there is a devcontainer, but no container in operation, pi shows this
+warning. It shows the same warning if there is no container runtime:
 
-Control is back with you at that point. Restart the container with
-`/devcontainer up`, or just carry on: you have been told, so continuing is your
-decision and later tool calls run on the host until you say otherwise.
+```
+⚠ Devcontainer found, but its container is not running.
+All tool calls are running on the host.
+  devcontainer.json: /home/me/app/.devcontainer/devcontainer.json
+  Run /devcontainer up to start it and route tool calls into it.
+```
 
-#### Getting back into the container
+**During the session.** The first routed tool call that finds no container does
+these three things:
 
-Restarting the container is not enough on its own. Tell the extension, with
-either of:
+1. It does not run the tool call, and it gives the reason.
+2. It stops the turn. The model cannot continue on the host in the same turn.
+3. It gives a warning. The status bar changes to `⚠ host · devcontainer stopped`.
+
+You then have control. Start the container with `/devcontainer up`, or continue.
+If you continue, the next tool calls run on the host.
+
+To route the tool calls into the container again, use one of these commands:
 
 | | |
 |---|---|
-| `/dc on` | Look again and route into the container |
+| `/dc on` | Look again, and route into the container |
 | `/devcontainer up` | Start the container, then route into it |
 
-A new session also re-detects from scratch. `/dc` is short for `/devcontainer`;
-both take the same arguments, and `/dc off` is the opposite of `/dc on`.
+A new session also examines the conditions again.
 
-#### `requireContainer` and losing the container
+### requireContainer
 
-`requireContainer: true` says the host is never acceptable, so it changes both
-situations: tool calls fail at startup instead of falling back, and after a loss
-they keep failing rather than continuing on the host.
+`requireContainer: true` does not permit the host in any condition:
 
 | | `requireContainer: false` (default) | `requireContainer: true` |
 |---|---|---|
-| No container at startup | Warning, tool calls run on the host | Tool calls fail, with the reason |
-| The call that finds the container gone | Does not run, ends the turn, warns | Same |
-| If you continue afterwards | Tool calls run on the host | Tool calls keep failing |
-| `/dc on` or `/devcontainer up` | Restores routing | Restores routing |
-| `/dc off` | Switches to the host deliberately | Refused, and says so |
+| No container at the start | Warning, and the tool calls run on the host | The tool calls fail, with the reason |
+| The tool call that finds no container | Does not run, stops the turn, gives a warning | The same |
+| The tool calls after that | Run on the host | Continue to fail |
+| `/dc on` or `/devcontainer up` | The routing starts again | The routing starts again |
+| `/dc off` | Moves the tool calls to the host | Refused, with a message |
 
-In short: the mid-session rule makes sure the *change* is visible, and
-`requireContainer` decides whether running on the host is allowed at all. To
-allow it again with `requireContainer: true`, remove the setting; nothing in the
-session can override it, and neither can a project.
+To permit the host again, remove the setting. A session cannot change it, and a
+project cannot change it.
 
-## Compatibility with other pi extensions
+## Operation with other extensions
 
-pi treats two extensions registering the same tool name as a **hard error** and
-refuses to load the later one. This extension claims `read`, `write`, `edit`,
-`bash`, `grep`, `find` and `ls`, so it collides with any other extension that
-overrides the same built-ins.
+If two extensions register the same tool name, pi gives an error and does not
+load the second extension. This extension registers `read`, `write`, `edit`,
+`bash`, `grep`, `find` and `ls`.
 
-| Extension | Status |
-|-----------|--------|
-| MCP adapters, memory/compaction tools | Compatible: different tool names |
-| Read/search enhancers that override `read`/`grep`/`edit`/`write` | Conflicts on those names |
-| Display wrappers that re-register built-ins | Conflicts, and some claim whichever built-ins are still free |
-| Host sandbox providers that override `bash` | Conflicts, and overlaps in purpose |
+| Extension | Condition |
+|-----------|-----------|
+| MCP adapters, memory and compaction tools | Compatible. The tool names are different |
+| Extensions that replace `read`, `grep`, `edit` or `write` | Conflict on those names |
+| Extensions that show the built-in tools in a different format | Conflict. Some of them take the tools that are still free |
+| Sandbox extensions that replace `bash` | Conflict, and the same function |
 
-Use `tools` to claim only a subset and leave the rest to another extension:
+Use `tools` to register some of the tools only:
 
 ```jsonc
 // ~/.pi/agent/settings.json
@@ -576,170 +637,52 @@ Use `tools` to claim only a subset and leave the rest to another extension:
 }
 ```
 
-Two caveats before doing that:
+Two conditions apply. First, the tools that this extension does not register run
+on the host. If another extension has `read` and `grep`, the model reads host
+files while it executes commands in the container. The startup message and the
+`/devcontainer` menu give the names of these tools. Second, a host sandbox and a
+container do the same task. Use one of them, and not both.
 
-- **Anything not claimed here runs on the host.** Leaving `read` and `grep` to
-  another extension means the model reads host files while it executes in the
-  container. The startup message and the `/devcontainer` menu list unrouted
-  tools explicitly so this is never silent.
-- **A host sandbox and a container are two answers to the same question.** If
-  another extension already isolates execution on the host, running both is
-  contradictory; pick one.
+The extension does not route the tools of MCP servers. Those servers run on the
+host, outside the container.
 
-Tools from MCP servers are not routed either. They are separate tools run by
-their own server process on the host, outside the container boundary.
+## Other conditions
 
-## Requirements
+- Commands run as the user in your `devcontainer.json` file: `remoteUser`, or
+  `containerUser`. If that user does not operate correctly, the extension stops
+  the use of `--user`. The container then uses the default user of the image.
+- `find` and `grep` do not examine `.git` and `node_modules`. If the container
+  has no `rg`, `grep` does not use the `.gitignore` file.
+- The extension uses the tools of pi to read a host path. Those tools operate as
+  in a session with no container, and use the `.gitignore` file.
 
-**On the host**
+## Disclaimer
 
-- `docker` or `podman`. Both are probed, and the one that actually has the
-  container is used.
-- A **running** container for the workspace, carrying the
-  `devcontainer.local_folder` / `devcontainer.config_file` labels that identify
-  it. Anything that speaks the devcontainer spec sets these: VS Code, the
-  devcontainer CLI, or `/devcontainer up`.
-- The `devcontainer` CLI **only** if you want `/devcontainer up` to start the
-  container for you.
+An AI model wrote most of the code, the tests and this documentation. The author
+has reviewed each change at a high level and tested the extension. The
+review was not a full audit. The automated test suite operates against a real
+container, and not only against test doubles.
 
-The last two are independent, not nested. Starting containers from VS Code
-satisfies the second without the CLI ever being installed; conversely, having
-the CLI installed does not give you a running container. If you never use
-`/devcontainer up`, you do not need the CLI at all.
+The model makes the tool calls, and this extension sends them into the
+container. The model can execute commands in the container. It can write files
+and delete files there. It can also read a small set of paths on your host. If
+the container has access to a network, the model can send data to a remote
+system.
 
-**In the container**
+A configuration that is not correct, or a defect, can cause a loss of data. It
+can also make private data available to the model, and then to a remote system.
+The extension keeps the credentials of pi unavailable. It cannot control what
+the model does with the data that it reads. Examine the code, and make your own
+decision.
 
-Nothing beyond a shell and coreutils. `rg` is used for `grep` when present and
-plain `grep` otherwise: at detection time the extension runs
-`command -v rg` inside the container, once, and the answer is shown in the
-`/devcontainer` menu as `Shell  bash · ripgrep: no (using grep)`. The same probe
-picks `bash` or falls back to `sh`.
+The author cannot make sure that the extension is safe in all conditions. The
+software has no warranty. The author has no liability for damages of any type.
+The [MIT License](LICENSE) gives the full text:
 
-## Behavior notes
-
-- When no devcontainer is found, or its container is not running, tool calls
-  fall back to the host instead of failing, unless `requireContainer` is set. This is never silent: pi shows a
-  startup warning saying tool calls are running on the host, and the footer
-  shows `⚠ host · no devcontainer` or `⚠ host · devcontainer stopped` for the
-  whole session. See [Status bar](#status-bar).
-- Commands run in the container as the user your `devcontainer.json` asks for:
-  `remoteUser`, or `containerUser` if that is the one set. If that user does not
-  work in the container, the extension stops passing `--user` and lets the
-  container use the image's own default user rather than failing the call.
-- `.git` and `node_modules` are skipped by `find` and `grep`. Without `rg` in the
-  container, `.gitignore` is not honored by `grep`.
-- Reading a host path through the read-only window uses pi's own tools on the
-  host, so `find` and `grep` behave there exactly as they do in an unrouted
-  session, `.gitignore` included. Writing to one is refused rather than routed,
-  so a refusal never silently creates a container-side file with the same name.
-- Aborts and timeouts kill the process inside the container.
-- Detection runs in the background at session start, so pi is usable
-  immediately. The startup message and the footer appear when it finishes, and
-  a tool call that arrives first simply waits for the same answer.
-- Container CLI probes and inspections are bounded at 15s, so an unresponsive
-  daemon or a stale `DOCKER_HOST` cannot hang pi at startup. `/devcontainer up`
-  is deliberately unbounded because building an image can take minutes; while it
-  runs, its output is shown live above the editor, so a long build looks like
-  progress rather than a hang.
-- `PI_SESSION_ID`, `PI_PROVIDER`, `PI_MODEL` and `PI_REASONING_LEVEL` are
-  forwarded into container commands. pi sets these for its own `bash` tool and
-  tells the model it can read them, so forwarding keeps that true once commands
-  are routed: a script can tag build artefacts or a commit with the session that
-  produced them, log which model made a change, or take a different path for a
-  cheaper model. Nothing in this extension depends on them.
-- `PI_SESSION_FILE` is **not** forwarded, because it is a host path: inside the
-  container it would name a file that does not exist. Host variables that merely
-  begin with `PI_` are not forwarded either; apart from the four above, the
-  environment is the container's own.
-
-## Repository layout
-
-```
-package.json          pi manifest (pi.extensions -> ./src/index.ts)
-src/index.ts          entry point: tool overrides, events, status bar, menu, flag
-src/operations.ts     container-backed tool operations, path mapping, grep
-src/container.ts      runtime detection, container lookup, exec plumbing
-src/discovery.ts      devcontainer.json discovery, JSONC parsing
-src/config.ts         settings.json merging
-src/routing.ts        which commands escape to the host
-test/test-discovery.ts   unit tests, no container or pi packages needed
-test/test-docs.ts        checks this README against the code
-test/test-config.ts      settings merging and runtime/CLI arg wiring
-test/test-routing.ts     host-command matching and escape behaviour
-test/test-harness.ts     container operations against a real container
-test/test-escape.ts      proves routed tools cannot reach the host
-test/test-extension.ts   extension lifecycle and routing (5 scenarios)
-test/test-menu.ts        menu rendering, status bar, routing toggle
-dev/container-status.ts  reports whether this repo's container is running
-devenv.nix            dev shell, dev scripts, and `devenv test`
-.devcontainer/        generated by devenv; also the fixture the tests use
-```
-
-## Development
-
-The repo uses [devenv](https://devenv.sh) to provide Node and npm, so the
-toolchain is the same everywhere and does not depend on what happens to be on
-your PATH.
-
-The sources and tests are `.ts` run directly by Node, so it needs unflagged
-TypeScript type stripping (Node 23.6+) and `path.posix.matchesGlob` (Node
-22.5+). `devenv.nix` pins `pkgs.nodejs_24` rather than tracking the newest
-release for two reasons: 24 is the active LTS line, while `pkgs.nodejs_latest`
-is currently 26.x and on the short-lived current track; and pinning means a
-nixpkgs bump cannot change the runtime under the test suite without a visible
-edit. Nothing here depends on 24 specifically, so bumping that one line is
-enough if you want a newer Node.
-
-```bash
-devenv shell        # node, npm, and the scripts below
-
-pi-link-deps        # link pi's peer deps into ./node_modules
-pi-check            # unit tests only, no container required
-pi-test             # full suite, needs this repo's devcontainer running
-pi-container-up     # start the devcontainer
-```
-
-`devenv.nix` also generates `.devcontainer/devcontainer.json`, so the container
-the tests run against is defined in the same place as the dev shell.
-
-`pi-link-deps` symlinks pi's peer dependencies into `node_modules/` so the test
-files can resolve them. It is gitignored, is not part of the published package,
-and is recreated on every `pi-check`/`pi-test` run, so it can be deleted at any
-time.
-
-## Tests
-
-```bash
-devenv test
-```
-
-This runs the container-free checks first, then detects whether this
-repository's devcontainer is running. If it is, the full suite runs against it
-(215 tests). If not, the integration suites are skipped with a message rather
-than failing, which is what makes the same command safe as the container's
-`updateContentCommand`. Set `PI_DEVCONTAINER_SKIP_INTEGRATION=1` to force the
-skip.
-
-Without devenv, run the suites directly with Node 24:
-
-```bash
-# Same resolution pi-link-deps uses: the pi on your PATH, left unresolved so the
-# link follows pi upgrades instead of pinning one version's install path.
-PI=$(dirname "$(command -v pi)")/../lib/node_modules/pi-monorepo
-mkdir -p node_modules/@earendil-works
-ln -sfn "$PI" node_modules/@earendil-works/pi-coding-agent
-ln -sfn "$PI/node_modules/@earendil-works/pi-tui" node_modules/@earendil-works/pi-tui
-
-node test/test-discovery.ts
-node test/test-config.ts
-node test/test-routing.ts
-node test/test-harness.ts
-node test/test-extension.ts container
-node test/test-extension.ts disabled
-node test/test-menu.ts
-(tmp=$(mktemp -d) && echo on-the-host > "$tmp/host-marker.txt" \
-  && cd "$tmp" && node "$OLDPWD/test/test-extension.ts" host)
-```
-
-The suites derive the repository path, container name, and container workspace
-from discovery, so they work in any checkout with a running devcontainer.
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.

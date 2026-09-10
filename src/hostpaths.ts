@@ -230,6 +230,10 @@ export function parseIgnoreList(entries: readonly string[], home?: string): Igno
 		}
 		const pinned = glob.startsWith("/");
 		const anyDepth = { doubleStar: true } as const;
+		// "." components are dropped, so "./secrets" and "secrets" agree. Paths are
+		// resolved before they are compared, and never contain one.
+		const parts = glob.split("/").filter((part) => part && part !== ".");
+		if (parts.length === 0) continue;
 		patterns.push({
 			negated,
 			segments: [
@@ -237,7 +241,7 @@ export function parseIgnoreList(entries: readonly string[], home?: string): Igno
 				// matched covers what is under it, as a directory entry does in a
 				// .gitignore.
 				...(pinned ? [] : [anyDepth]),
-				...glob.split("/").filter(Boolean).map(compileSegment),
+				...parts.map(compileSegment),
 				anyDepth,
 			],
 		});

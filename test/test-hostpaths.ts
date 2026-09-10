@@ -282,6 +282,24 @@ async function main(): Promise<void> {
 		}
 	});
 
+	await test("a name matches a whole component, never part of one", () => {
+		const guarded = createHostReadPolicy({ roots: [home], agentDir, ignore: ["id_rsa"] });
+		assert.strictEqual(guarded.decide(path.join(home, "keys", "id_rsa")).verdict, "denied");
+		assert.strictEqual(guarded.decide(path.join(home, "keys", "id_rsa.pub")).verdict, "readable");
+		assert.strictEqual(guarded.decide(path.join(home, "keys", "old_id_rsa_backup")).verdict, "readable");
+	});
+
+	await test("'.' and '..' are removed from a path before the patterns are applied", () => {
+		const guarded = createHostReadPolicy({ roots: [home], agentDir, ignore: ["secrets"] });
+		assert.strictEqual(guarded.decide(path.join(home, "x", "..", "secrets", "a.txt")).verdict, "denied");
+		assert.strictEqual(guarded.decide(path.join(home, ".", "secrets", "a.txt")).verdict, "denied");
+	});
+
+	await test("a pattern can start with './'", () => {
+		const guarded = createHostReadPolicy({ roots: [home], agentDir, ignore: ["./secrets"] });
+		assert.strictEqual(guarded.decide(path.join(home, "secrets", "a.txt")).verdict, "denied");
+	});
+
 	await test("an unparseable pattern falls back to a literal name", () => {
 		const guarded = createHostReadPolicy({ roots: [home], agentDir, ignore: ["[unclosed"] });
 		assert.strictEqual(guarded.decide(path.join(home, "[unclosed")).verdict, "denied");
