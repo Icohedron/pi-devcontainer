@@ -63,6 +63,7 @@ import {
 	piResourceRoots,
 	resolveReadableRoots,
 } from "./hostpaths.ts";
+import { PROGRESS_KEY, withProgress } from "./progress.ts";
 import { planHostCommand } from "./routing.ts";
 import {
 	createContainerBashOps,
@@ -472,7 +473,9 @@ export default function (pi: ExtensionAPI) {
 		// Detection costs several container CLI round trips, which are slow
 		// enough to be felt. Do it in the background so pi starts immediately;
 		// the first tool call waits on the same promise if it gets there first.
-		void ensureDetected().then(() => {
+		void withProgress(ctx.hasUI ? ctx.ui : undefined, "Looking for the devcontainer", () =>
+			ensureDetected(),
+		).then(() => {
 			if (!state.config.enabled) state.disabled = true;
 			updateStatus(ctx);
 			if (!ctx.hasUI) return;
@@ -482,7 +485,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async (_event, ctx) => {
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+		if (!ctx.hasUI) return;
+		ctx.ui.setStatus(STATUS_KEY, undefined);
+		ctx.ui.setWidget?.(PROGRESS_KEY, undefined);
 	});
 
 	// Tell the model that paths and commands resolve inside the container.
@@ -819,7 +824,7 @@ export default function (pi: ExtensionAPI) {
 	async function openMenu(ctx: ExtensionCommandContext): Promise<void> {
 		// An explicit action: always look again, so a container that came back is
 		// picked up here too.
-		await refreshDetection();
+		await withProgress(ctx.ui, "Looking for the devcontainer", () => refreshDetection());
 		updateStatus(ctx);
 
 		if (ctx.mode !== "tui") {
@@ -828,7 +833,7 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
-		const rows = await collectDetails();
+		const rows = await withProgress(ctx.ui, "Reading the container details", () => collectDetails());
 		const hasTarget = state.target !== null;
 
 		await ctx.ui.custom((tui, theme, _keybindings, done) => {
@@ -941,7 +946,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (action === "on" || action === "container") {
 				state.disabled = false;
-				await refreshDetection();
+				await withProgress(ctx.ui, "Looking for the devcontainer", () => refreshDetection());
 				updateStatus(ctx);
 				const { message, level } = describeRouting();
 				ctx.ui.notify(message, level);
@@ -982,7 +987,7 @@ export default function (pi: ExtensionAPI) {
 				);
 				ctx.ui.setWidget?.(STATUS_KEY, undefined);
 				state.disabled = false;
-				await refreshDetection();
+				await withProgress(ctx.ui, "Looking for the devcontainer", () => refreshDetection());
 				updateStatus(ctx);
 				if (!result.ok && !state.target) {
 					ctx.ui.notify(`devcontainer up failed:\n${result.output.slice(-2000)}`, "error");
@@ -995,7 +1000,7 @@ export default function (pi: ExtensionAPI) {
 
 			// Print-only status for scripts and non-TUI modes.
 			if (action === "status") {
-				await refreshDetection();
+				await withProgress(ctx.ui, "Looking for the devcontainer", () => refreshDetection());
 				updateStatus(ctx);
 				const { message, level } = describeRouting();
 				ctx.ui.notify(message, level);

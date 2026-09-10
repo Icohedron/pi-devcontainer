@@ -41,6 +41,7 @@ const tools = new Map<string, any>();
 const commands = new Map<string, any>();
 const notifications: Array<{ message: string; level: string }> = [];
 const statuses: Array<string | undefined> = [];
+const widgets: Array<{ key: string; content: unknown }> = [];
 const customFactories: any[] = [];
 
 const pi: any = {
@@ -78,6 +79,9 @@ const ctx: any = {
 		},
 		setStatus(_key: string, value: string | undefined) {
 			statuses.push(value);
+		},
+		setWidget(key: string, content: unknown) {
+			widgets.push({ key, content });
 		},
 		theme: { fg: (_key: string, text: string) => text, bold: (text: string) => text },
 		custom: async (factory: any) => {
@@ -412,6 +416,41 @@ async function main(): Promise<void> {
 			await commands.get("devcontainer").handler("status", ctx);
 			const result = await bash.execute("t", { command: "pwd" }, undefined, undefined, ctx);
 			assert.ok(textOf(result).includes(WS), "status must re-check rather than trust a stale answer");
+		});
+
+		await test("a slow lookup shows a progress line, and always removes it", async () => {
+			const { PROGRESS_KEY } = await import("../src/progress.ts");
+			const before = widgets.length;
+			await commands.get("devcontainer").handler("status", ctx);
+
+			const forProgress = widgets.slice(before).filter((entry) => entry.key === PROGRESS_KEY);
+			// A lookup can be quicker than the delay, and then there is no line
+			// at all. Either way, none may be left on the screen.
+			if (forProgress.length > 0) {
+				assert.strictEqual(forProgress.at(-1)?.content, undefined, "the progress line was left on the screen");
+				assert.strictEqual(
+					forProgress.filter((entry) => entry.content !== undefined).length,
+					forProgress.filter((entry) => entry.content === undefined).length,
+					"each progress line must be removed one time",
+				);
+			}
+		});
+
+		await test("the progress line renders the pi indicator and a message", async () => {
+			const { PROGRESS_KEY } = await import("../src/progress.ts");
+			const factory = widgets
+				.filter((entry) => entry.key === PROGRESS_KEY && typeof entry.content === "function")
+				.at(-1)?.content as ((tui: any, theme: any) => any) | undefined;
+			if (!factory) {
+				console.log("        (every lookup beat the delay, so no line was shown)");
+				return;
+			}
+			const widget = factory({ requestRender() {} }, { fg: (_c: string, text: string) => text });
+			try {
+				assert.match(widget.render(60).join("").trim(), /^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] Looking for the devcontainer$/);
+			} finally {
+				widget.dispose();
+			}
 		});
 
 		await test("a short /dc alias exists and takes the same arguments", async () => {

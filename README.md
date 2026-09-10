@@ -112,6 +112,18 @@ arguments. `container` and `host` are other spellings of `on` and `off`.
 In the `-p`, JSON and RPC modes, `/devcontainer` shows the status. It does not
 open the menu.
 
+A lookup asks the container runtime for the containers and their details. This
+operation is not instant. It happens at the start of a session, and again for
+each command in the list above that examines the container. While the extension
+waits, it shows a line with the indicator that pi uses for its own work:
+
+```
+⠹ Looking for the devcontainer
+```
+
+The line comes after a short delay. A lookup that is quicker than the delay
+shows no line.
+
 ## The menu
 
 `/devcontainer` with no argument opens a panel. The panel shows the details of

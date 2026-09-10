@@ -88,6 +88,8 @@
           if (typeof m.default !== "function") { console.error("src/index.ts has no default export"); process.exit(1); }
           console.log("  src/index.ts loads and exports an extension factory");
         }).catch(e => { console.error(e); process.exit(1); })'
+        echo "==> progress line"
+        node test/test-progress.ts
       else
         echo "  skipped: pi is not on PATH, so there is nothing to link against"
       fi
@@ -105,6 +107,8 @@
       node test/test-config.ts
       echo "==> readable host paths"
       node test/test-hostpaths.ts
+      echo "==> progress line"
+      node test/test-progress.ts
       echo "==> host command security"
       node test/test-security.ts
       echo "==> host command routing"
