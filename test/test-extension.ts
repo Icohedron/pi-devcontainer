@@ -8,6 +8,7 @@ import assert from "node:assert";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { detectRuntimes, findRunningContainer } from "../src/container.ts";
 import { findDevcontainerConfig } from "../src/discovery.ts";
 
@@ -121,7 +122,21 @@ function fakeHome(settings: unknown): string {
 		}
 	}
 	writeFileSync(path.join(home, ".pi", "agent", "settings.json"), JSON.stringify(settings));
+
+	// pi reads its agent directory from an environment variable before it reads
+	// HOME. A developer who has one set would otherwise run these tests against
+	// their own installation, where the result would depend on the skills and
+	// extensions they installed. Remove any such variable, whatever the build of
+	// pi calls it, and then confirm with pi itself.
+	for (const name of Object.keys(process.env)) {
+		if (name.endsWith("_CODING_AGENT_DIR")) delete process.env[name];
+	}
 	process.env.HOME = home;
+
+	const agentDir = getAgentDir();
+	if (!agentDir.startsWith(home)) {
+		throw new Error(`this test must not read a real pi installation, but the agent directory is ${agentDir}`);
+	}
 	return home;
 }
 

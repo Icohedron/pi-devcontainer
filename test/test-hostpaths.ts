@@ -359,7 +359,7 @@ async function main(): Promise<void> {
 		// pi hands over the directory of each skill it loaded, and with the usual
 		// layout each one is already under <agent dir>/skills or <agent dir>/npm.
 		// Without this, ten skills mean ten roots that add nothing but noise.
-		const inNpm = path.join(agentDir, "npm", "node_modules", "pi-drawio", "skills", "drawio");
+		const inNpm = path.join(agentDir, "npm", "node_modules", "a-package", "skills", "one");
 		const policy = createHostReadPolicy({
 			roots: [skills, path.join(skills, "tuicr"), path.join(agentDir, "npm"), inNpm, path.join(home, "reference")],
 			agentDir,
