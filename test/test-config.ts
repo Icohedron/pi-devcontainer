@@ -389,31 +389,34 @@ async function main(): Promise<void> {
 
 	console.log("\n--- runtime fallback ---");
 
-	await test("finds the container even when another runtime answers first but has none", async () => {
-		if (!realTarget) {
-			throw new Error("needs a running devcontainer");
-		}
-		// Simulate docker installed alongside podman, managing no containers.
-		const dir = mkdtempSync(path.join(tmpdir(), "dc-fakedocker-"));
-		const fake = path.join(dir, "docker");
-		writeFileSync(fake, "#!/bin/sh\ncase \"$1\" in ps) exit 0 ;; *) exit 1 ;; esac\n");
-		chmodSync(fake, 0o755);
-		const originalPath = process.env.PATH;
-		process.env.PATH = `${dir}:${originalPath}`;
-		try {
-			const runtimes = await detectRuntimes();
-			assert.ok(
-				runtimes.some((r) => r.bin === "docker") && runtimes.some((r) => r.bin === "podman"),
-				`expected both runtimes to be probed, got ${runtimes.map((r) => r.bin).join(", ")}`,
-			);
-			const target = await findRunningContainer(runtimes, devcontainer!);
-			assert.ok(target, "must fall through to the runtime that actually has the container");
-			assert.strictEqual(target.name, realTarget.name);
-		} finally {
-			process.env.PATH = originalPath;
-			rmSync(dir, { recursive: true, force: true });
-		}
-	});
+	// Needs a real container to fall through to, so it is skipped wherever the
+	// runtime wiring tests above were: in-container runs have no docker/podman.
+	if (!realTarget) {
+		console.log("  SKIP  no running devcontainer; the fallback test needs one");
+	} else {
+		await test("finds the container even when another runtime answers first but has none", async () => {
+			// Simulate docker installed alongside podman, managing no containers.
+			const dir = mkdtempSync(path.join(tmpdir(), "dc-fakedocker-"));
+			const fake = path.join(dir, "docker");
+			writeFileSync(fake, "#!/bin/sh\ncase \"$1\" in ps) exit 0 ;; *) exit 1 ;; esac\n");
+			chmodSync(fake, 0o755);
+			const originalPath = process.env.PATH;
+			process.env.PATH = `${dir}:${originalPath}`;
+			try {
+				const runtimes = await detectRuntimes();
+				assert.ok(
+					runtimes.some((r) => r.bin === "docker") && runtimes.some((r) => r.bin === "podman"),
+					`expected both runtimes to be probed, got ${runtimes.map((r) => r.bin).join(", ")}`,
+				);
+				const target = await findRunningContainer(runtimes, devcontainer!);
+				assert.ok(target, "must fall through to the runtime that actually has the container");
+				assert.strictEqual(target.name, realTarget.name);
+			} finally {
+				process.env.PATH = originalPath;
+				rmSync(dir, { recursive: true, force: true });
+			}
+		});
+	}
 
 	console.log(`\n${failed === 0 ? "ALL TESTS PASSED" : "SOME TESTS FAILED"}: ${passed} passed, ${failed} failed\n`);
 	process.exit(failed === 0 ? 0 : 1);
