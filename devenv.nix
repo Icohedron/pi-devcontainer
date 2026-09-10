@@ -73,6 +73,8 @@
       node test/test-docs.ts
       echo "==> config merge tests"
       node test/test-config.ts
+      echo "==> readable host paths"
+      node test/test-hostpaths.ts
       echo "==> host command security"
       node test/test-security.ts
       echo "==> host command routing"
@@ -101,6 +103,8 @@
       node test/test-docs.ts
       echo "==> config and runtime wiring"
       node test/test-config.ts
+      echo "==> readable host paths"
+      node test/test-hostpaths.ts
       echo "==> host command security"
       node test/test-security.ts
       echo "==> host command routing"
@@ -117,6 +121,8 @@
       node test/test-extension.ts strict
       echo "==> extension, started in a subdirectory"
       node test/test-extension.ts nested
+      echo "==> extension, the read-only host window"
+      node test/test-extension.ts hostreads
       echo "==> menu, status bar and toggle"
       node test/test-menu.ts
       echo "==> extension, host fallback"

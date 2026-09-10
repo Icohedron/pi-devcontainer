@@ -17,6 +17,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -29,6 +30,9 @@ import {
 	createReadTool,
 	createWriteTool,
 	DynamicBorder,
+	getAgentDir,
+	getDocsPath,
+	getExamplesPath,
 	getSettingsListTheme,
 } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
@@ -48,6 +52,14 @@ import {
 	ROUTABLE_TOOLS,
 } from "./config.ts";
 import { type DevcontainerConfig, findDevcontainerConfig } from "./discovery.ts";
+import {
+	createHostReadPolicy,
+	type HostPathDecision,
+	type HostReadPolicy,
+	isInside,
+	piResourceRoots,
+	resolveReadableRoots,
+} from "./hostpaths.ts";
 import { planHostCommand, toHostPath } from "./routing.ts";
 import {
 	createContainerBashOps,
@@ -63,6 +75,13 @@ import {
 
 const STATUS_KEY = "devcontainer";
 
+/**
+ * Tools that may look at a readable host path. The rest of the routed tools
+ * stay in the container, which is what makes the window read-only: there is no
+ * code path from `write`, `edit` or `bash` to the host filesystem.
+ */
+const HOST_READ_TOOLS = new Set(["read", "ls", "find", "grep"]);
+
 
 interface RoutingState {
 	devcontainer: DevcontainerConfig | null;
@@ -72,6 +91,12 @@ interface RoutingState {
 	target: ContainerTarget | null;
 	/** User opted out of routing for this session */
 	disabled: boolean;
+	/** Host paths readable through routed lookups, and why */
+	hostRead: HostReadPolicy;
+	/** The subset of those roots that came from `readableHostPaths` */
+	configuredRoots: string[];
+	/** Skill and extension paths named in the user's settings.json */
+	resourcePaths: string[];
 }
 
 export default function (pi: ExtensionAPI) {
@@ -100,11 +125,58 @@ export default function (pi: ExtensionAPI) {
 		configSources: [],
 		target: null,
 		disabled: false,
+		hostRead: createHostReadPolicy({ roots: [] }),
+		configuredRoots: [],
+		resourcePaths: [],
 	};
 
 	let detecting: Promise<void> | undefined;
 	let detectedOnce = false;
 	let projectTrusted = false;
+	/** Directories of the skills pi loaded, learned from the system prompt options. */
+	let skillDirs: string[] = [];
+
+	/**
+	 * Rebuild the read-only host window.
+	 *
+	 * Roots that do not exist are dropped so the menu and the system prompt only
+	 * ever name real paths, and so a stale entry cannot make the model believe a
+	 * lookup will work.
+	 */
+	function rebuildHostRead(): void {
+		const home = homedir();
+		const agentDir = getAgentDir();
+		const hostWorkspace = state.target?.hostWorkspace ?? state.devcontainer?.workspaceFolder;
+		const resolve = (entries: readonly string[]) =>
+			resolveReadableRoots(entries, { home, cwd: localCwd, hostWorkspace });
+
+		const piRoots = resolve(
+			piResourceRoots({
+				agentDir,
+				home,
+				skillDirs,
+				// pi's own documentation and examples: the system prompt points the
+				// model at them by host path, same as it does for skills.
+				extra: [getDocsPath(), getExamplesPath(), ...state.resourcePaths],
+			}),
+		).roots;
+
+		// Only what the user asked for by hand is worth a warning; the defaults
+		// name locations that legitimately may not exist on this machine.
+		const configured = resolve(state.config.readableHostPaths);
+		for (const entry of configured.skipped) {
+			console.warn(`devcontainer: not making ${entry.path} readable; ${entry.reason}`);
+		}
+
+		const exists = (root: string) => existsSync(root);
+		state.configuredRoots = configured.roots.filter(exists);
+		state.hostRead = createHostReadPolicy({
+			roots: [...piRoots, ...configured.roots].filter(exists),
+			agentDir,
+			ignore: state.config.unreadableHostPatterns,
+			home,
+		});
+	}
 
 
 	/** Discover the devcontainer and its running container. */
@@ -121,12 +193,17 @@ export default function (pi: ExtensionAPI) {
 		});
 		state.config = loaded.config;
 		state.configSources = loaded.sources;
+		state.resourcePaths = loaded.resourcePaths;
 
-		if (!state.devcontainer) return;
+		if (!state.devcontainer) {
+			rebuildHostRead();
+			return;
+		}
 
 		const { runtimes, target } = await discoverContainer(state.config, state.devcontainer, previous);
 		state.runtimes = runtimes;
 		state.target = target;
+		rebuildHostRead();
 	}
 
 	function runDetection(): Promise<void> {
@@ -197,6 +274,26 @@ export default function (pi: ExtensionAPI) {
 		return toHostPath(argument, target.containerWorkspace, target.hostWorkspace, existsSync);
 	}
 
+	/**
+	 * Decide whether a tool call is aimed at a readable host path.
+	 *
+	 * Only an absolute path can be: a relative one resolves against the session's
+	 * container directory, and a path inside the workspace is bind-mounted, so
+	 * the container is already looking at the same file and routing it is both
+	 * correct and cheaper.
+	 */
+	function hostPathDecision(
+		target: ContainerTarget,
+		params: unknown,
+	): HostPathDecision & { path?: string } {
+		const raw = (params as { path?: unknown } | undefined)?.path;
+		if (typeof raw !== "string") return { verdict: "container" };
+		const cleaned = raw.trim().replace(/^@/, "");
+		if (!cleaned || !path.isAbsolute(cleaned)) return { verdict: "container" };
+		if (isInside(target.hostWorkspace, cleaned)) return { verdict: "container" };
+		return { ...state.hostRead.decide(cleaned), path: cleaned };
+	}
+
 	/** The container to route into, or null when tools should run on the host. */
 	async function activeTarget(): Promise<ContainerTarget | null> {
 		await ensureDetected();
@@ -221,6 +318,38 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			ctx.ui.setStatus(STATUS_KEY, theme.fg("warning", "⚠ host · no devcontainer"));
 		}
+	}
+
+	/** Host roots that came from `readableHostPaths` rather than from pi itself. */
+	function configuredHostRoots(): string[] {
+		return state.configuredRoots.filter((root) => state.hostRead.roots.includes(root));
+	}
+
+	/** Short phrase naming what the host window shows, or "" when it is shut. */
+	function hostReadSummary(): string {
+		if (state.hostRead.roots.length === 0) return "";
+		const configured = configuredHostRoots();
+		const parts = ["pi skills, extensions and docs", ...(configured.length > 0 ? [configured.join(", ")] : [])];
+		return `${parts.join(" + ")} (read-only)`;
+	}
+
+	/**
+	 * The sentence that tells the model these paths exist on the host.
+	 *
+	 * Without it the model would see a skill named by a host path, fail to read
+	 * it in the container, and have no way to know why.
+	 */
+	function describeHostReads(): string {
+		if (state.hostRead.roots.length === 0) return "";
+		const configured = configuredHostRoots();
+		const subjects = [
+			"pi's own skills, extensions and documentation",
+			...(configured.length > 0 ? [configured.join(", ")] : []),
+		];
+		return (
+			`${subjects.join(" and ")} live on the host, outside the container: read, ls, find and grep` +
+			` open those host paths read-only, while write, edit and bash cannot reach them.`
+		);
 	}
 
 	/** Startup summary: where tool calls will actually run. */
@@ -248,6 +377,7 @@ export default function (pi: ExtensionAPI) {
 					`  container:         ${target.name}`,
 					`  workspace:         ${target.containerWorkspace} (host: ${target.hostWorkspace})`,
 					`  routed tools:      ${[...claimed].join(", ") || "none"}`,
+					...(hostReadSummary() ? [`  host reads:        ${hostReadSummary()}`] : []),
 					...(ROUTABLE_TOOLS.some((name) => !claimed.has(name))
 						? [
 								`  NOT routed:        ${ROUTABLE_TOOLS.filter((name) => !claimed.has(name)).join(", ")}` +
@@ -320,6 +450,17 @@ export default function (pi: ExtensionAPI) {
 
 	// Tell the model that paths and commands resolve inside the container.
 	pi.on("before_agent_start", async (event) => {
+		// pi hands over the skills it loaded, so the directories they live in are
+		// known without this extension having to reimplement skill discovery.
+		// Their SKILL.md paths are named in the system prompt as host paths.
+		const loadedSkillDirs = (event.systemPromptOptions?.skills ?? [])
+			.map((skill) => skill.baseDir || (skill.filePath ? path.dirname(skill.filePath) : ""))
+			.filter(Boolean);
+		if (loadedSkillDirs.length !== skillDirs.length || loadedSkillDirs.some((dir, i) => dir !== skillDirs[i])) {
+			skillDirs = loadedSkillDirs;
+			rebuildHostRead();
+		}
+
 		const target = await activeTarget();
 		if (!target) return;
 
@@ -334,6 +475,9 @@ export default function (pi: ExtensionAPI) {
 				` These exact commands run on the host instead, as a single program with plain` +
 				` arguments and no shell features: ${state.config.hostCommands.join(", ")}.`;
 		}
+
+		const hostReadLine = describeHostReads();
+		if (hostReadLine) containerLine += ` ${hostReadLine}`;
 
 		const systemPrompt = event.systemPrompt.includes(hostLine)
 			? event.systemPrompt.replace(hostLine, containerLine)
@@ -450,6 +594,23 @@ export default function (pi: ExtensionAPI) {
 					return tool.local.execute(id, params, signal, onUpdate);
 				}
 				try {
+					// A path on the host window is served from the host, read-only, and
+					// by pi's own tool: the container has no copy of it to route to.
+					const host = hostPathDecision(target, params);
+					if (host.verdict === "denied") {
+						throw new Error(`Refused: ${host.reason}.`);
+					}
+					if (host.verdict === "readable") {
+						if (!HOST_READ_TOOLS.has(tool.name)) {
+							throw new Error(
+								`${host.path} is on the host, outside the devcontainer, and is readable but not writable ` +
+									`from a routed session. Only read, ls, find and grep can reach it.`,
+							);
+						}
+						// Hand the tool the path this decision was made about, so the
+						// check and the read can never resolve to different files.
+						return await tool.local.execute(id, { ...params, path: host.path }, signal, onUpdate);
+					}
 					return await tool.run(target, id, params, signal, onUpdate, ctx);
 				} catch (error) {
 					if (!isContainerGoneError(error)) throw error;
@@ -563,6 +724,14 @@ export default function (pi: ExtensionAPI) {
 		rows.push(["Shell", `${target.shell} · ripgrep: ${target.hasRipgrep ? "yes" : "no (using grep)"}`]);
 		rows.push(["Routed tools", [...claimed].join(", ") || "none"]);
 		rows.push(["! commands", state.config.userBash === "host" ? "host" : "container"]);
+		rows.push(["Host reads", hostReadSummary() || "none"]);
+		// The roots decide what a pattern in unreadableHostPatterns is aimed at,
+		// so they are worth naming rather than summarising.
+		if (state.hostRead.roots.length > 0) {
+			const shown = state.hostRead.roots.slice(0, 3).join(", ");
+			const rest = state.hostRead.roots.length - 3;
+			rows.push(["Readable roots", rest > 0 ? `${shown} (+${rest} more)` : shown]);
+		}
 		const unrouted = ROUTABLE_TOOLS.filter((name) => !claimed.has(name));
 		if (unrouted.length > 0) rows.push(["On the host", unrouted.join(", ")]);
 		appendConfigRows(rows);
@@ -584,6 +753,12 @@ export default function (pi: ExtensionAPI) {
 		if (state.config.upArgs.length > 0) rows.push(["upArgs", state.config.upArgs.join(" ")]);
 		if (state.config.hostCommands.length > 0) {
 			rows.push(["Host commands", state.config.hostCommands.join(", ")]);
+		}
+		if (state.config.readableHostPaths.length > 0) {
+			rows.push(["readableHostPaths", state.config.readableHostPaths.join(", ")]);
+		}
+		if (state.config.unreadableHostPatterns.length > 0) {
+			rows.push(["unreadableHostPatterns", state.config.unreadableHostPatterns.join(", ")]);
 		}
 	}
 

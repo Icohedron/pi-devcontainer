@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { detectRuntimes, findRunningContainer } from "../src/container.ts";
@@ -103,7 +103,7 @@ async function emit(event: string, payload: any = {}): Promise<any[]> {
 }
 
 /** Point HOME at a throwaway tree so user settings can be controlled. */
-function fakeHome(settings: unknown): void {
+function fakeHome(settings: unknown): string {
 	const home = mkdtempSync(path.join(tmpdir(), "dc-home-"));
 	mkdirSync(path.join(home, ".pi", "agent"), { recursive: true });
 	mkdirSync(path.join(home, ".config"), { recursive: true });
@@ -118,10 +118,37 @@ function fakeHome(settings: unknown): void {
 	}
 	writeFileSync(path.join(home, ".pi", "agent", "settings.json"), JSON.stringify(settings));
 	process.env.HOME = home;
+	return home;
+}
+
+/**
+ * A fake pi installation plus a reference directory outside the workspace, for
+ * the host-reads scenario: skills the model is told about by host path, and a
+ * credentials file that must stay invisible however wide the roots are.
+ */
+function scaffoldHostReads(): { home: string; reference: string } {
+	const reference = mkdtempSync(path.join(tmpdir(), "dc-ref-"));
+	const home = fakeHome({});
+	const agent = path.join(home, ".pi", "agent");
+	// The home directory is listed as readable on purpose: the deny rules, not
+	// the roots, are what keeps credentials out.
+	writeFileSync(
+		path.join(agent, "settings.json"),
+		JSON.stringify({
+			devcontainer: { readableHostPaths: [reference, home], unreadableHostPatterns: ["*.env", ".env"] },
+		}),
+	);
+	mkdirSync(path.join(agent, "skills", "demo"), { recursive: true });
+	writeFileSync(path.join(agent, "skills", "demo", "SKILL.md"), "---\nname: demo\n---\nskill-body-marker\n");
+	writeFileSync(path.join(agent, "auth.json"), '{"apiKey":"sk-do-not-read-me"}');
+	writeFileSync(path.join(reference, "notes.md"), "reference-marker\n");
+	writeFileSync(path.join(reference, ".env"), "TOKEN=sk-do-not-read-me\n");
+	return { home, reference };
 }
 
 async function main(): Promise<void> {
 	if (scenario === "strict") fakeHome({ devcontainer: { requireContainer: true } });
+	const hostReads = scenario === "hostreads" ? scaffoldHostReads() : undefined;
 
 	// Start pi well below the directory holding .devcontainer.
 	let nestedDir: string | undefined;
@@ -515,6 +542,138 @@ async function main(): Promise<void> {
 				}
 			}
 		});
+	} else if (scenario === "hostreads") {
+		console.log("\n--- the read-only host window ---");
+		assert.ok(hostReads);
+		const skill = path.join(hostReads.home, ".pi", "agent", "skills", "demo", "SKILL.md");
+		const notes = path.join(hostReads.reference, "notes.md");
+		const read = (params: any) => tools.get("read").execute("t", params, undefined, undefined, ctx);
+
+		await test("routing is active, so these tests mean something", () => {
+			assert.ok(discovered, "this scenario needs a running devcontainer");
+			assert.match(startup.message, /routed into the devcontainer/);
+		});
+
+		await test("a skill named in the system prompt by host path can be read", async () => {
+			assert.match(textOf(await read({ path: skill })), /skill-body-marker/);
+		});
+
+		await test("a configured host path can be read, listed, searched and globbed", async () => {
+			assert.match(textOf(await read({ path: notes })), /reference-marker/);
+			assert.match(
+				textOf(await tools.get("ls").execute("t", { path: hostReads.reference }, undefined, undefined, ctx)),
+				/notes\.md/,
+			);
+			assert.match(
+				textOf(
+					await tools
+						.get("grep")
+						.execute("t", { pattern: "reference-marker", path: hostReads.reference }, undefined, undefined, ctx),
+				),
+				/notes\.md/,
+			);
+			assert.match(
+				textOf(
+					await tools
+						.get("find")
+						.execute("t", { pattern: "*.md", path: hostReads.reference }, undefined, undefined, ctx),
+				),
+				/notes\.md/,
+			);
+		});
+
+		await test("the window is read-only: write and edit refuse rather than route", async () => {
+			for (const attempt of [
+				() => tools.get("write").execute("t", { path: notes, content: "tampered" }, undefined, undefined, ctx),
+				() =>
+					tools
+						.get("edit")
+						.execute(
+							"t",
+							{ path: notes, edits: [{ oldText: "reference-marker", newText: "tampered" }] },
+							undefined,
+							undefined,
+							ctx,
+						),
+			]) {
+				await assert.rejects(attempt(), /readable but not writable|Only read, ls, find and grep/);
+			}
+			assert.match(readFileSync(notes, "utf8"), /reference-marker/, "the host file must be untouched");
+		});
+
+		await test("bash cannot reach the window, so execution stays in the container", async () => {
+			// The container has no such file, and that is the point: nothing the
+			// agent executes can touch the host side of the window.
+			let output: string;
+			try {
+				output = textOf(await tools.get("bash").execute("t", { command: `cat ${notes}` }, undefined, undefined, ctx));
+			} catch (error) {
+				output = error instanceof Error ? error.message : String(error);
+			}
+			assert.ok(!output.includes("reference-marker"), output);
+			assert.match(output, /No such file/i);
+		});
+
+		await test("pi's own credentials are refused even with the home directory readable", async () => {
+			const authFile = path.join(hostReads.home, ".pi", "agent", "auth.json");
+			await assert.rejects(read({ path: authFile }), /agent directory/);
+		});
+
+		await test("what unreadableHostPatterns excludes is refused", async () => {
+			await assert.rejects(read({ path: path.join(hostReads.reference, ".env") }), /unreadableHostPatterns/);
+		});
+
+		await test("a workspace file is routed, so the exclusions do not apply to it", async () => {
+			// Worth stating: this window is a boundary, not a filter on the
+			// project. The container has the workspace bind-mounted, so its own
+			// .env reads exactly as it did before this existed.
+			const scratch = path.join(process.cwd(), ".dc-hostread-scratch");
+			mkdirSync(scratch, { recursive: true });
+			writeFileSync(path.join(scratch, ".env"), "WORKSPACE_MARKER=1\n");
+			try {
+				const result = await read({ path: path.join(scratch, ".env") });
+				assert.match(textOf(result), /WORKSPACE_MARKER/, "the container sees the project's own files");
+			} finally {
+				rmSync(scratch, { recursive: true, force: true });
+			}
+		});
+
+		await test("paths outside the window still mean the container's copy", async () => {
+			assert.ok(discovered);
+			const hostname = textOf(await read({ path: "/etc/hostname" })).trim();
+			assert.ok(
+				discovered.id.startsWith(hostname.split(/\s+/).pop() ?? "\u0000") ||
+					hostname.includes(discovered.id.slice(0, 12)),
+				`expected the container's /etc/hostname, got ${JSON.stringify(hostname)}`,
+			);
+		});
+
+		await test("the startup notice and menu say what is readable", async () => {
+			assert.match(startup.message, /host reads:\s+pi skills, extensions and docs/);
+			assert.ok(startup.message.includes(hostReads.reference), startup.message);
+		});
+
+		await test("the model is told the window exists, and that it is read-only", async () => {
+			const [result] = await emit("before_agent_start", {
+				systemPrompt: `Current working directory: ${process.cwd()}`,
+				systemPromptOptions: { skills: [{ baseDir: path.dirname(skill), filePath: skill }] },
+			});
+			assert.match(result.systemPrompt, /live on the host, outside the container/);
+			assert.match(result.systemPrompt, /read, ls, find and grep/);
+			assert.match(result.systemPrompt, /write, edit and bash cannot reach them/);
+		});
+
+		await test("a skill directory pi loaded from anywhere becomes readable", async () => {
+			const elsewhere = mkdtempSync(path.join(tmpdir(), "dc-skill-"));
+			writeFileSync(path.join(elsewhere, "SKILL.md"), "far-away-skill-marker\n");
+			await emit("before_agent_start", {
+				systemPrompt: "x",
+				systemPromptOptions: { skills: [{ baseDir: elsewhere, filePath: path.join(elsewhere, "SKILL.md") }] },
+			});
+			const result = await read({ path: path.join(elsewhere, "SKILL.md") });
+			assert.match(textOf(result), /far-away-skill-marker/);
+			rmSync(elsewhere, { recursive: true, force: true });
+		});
 	} else if (scenario === "disabled") {
 		console.log("\n--- routing disabled by --no-devcontainer ---");
 
@@ -584,6 +743,11 @@ async function main(): Promise<void> {
 		// Scratch created by this scenario; do not leave it in the source tree.
 		process.chdir(path.resolve(nestedDir, "..", "..", ".."));
 		rmSync(path.resolve(nestedDir, ".."), { recursive: true, force: true });
+	}
+
+	if (hostReads) {
+		rmSync(hostReads.reference, { recursive: true, force: true });
+		rmSync(hostReads.home, { recursive: true, force: true });
 	}
 
 	await emit("session_shutdown", { reason: "quit" });

@@ -14,6 +14,7 @@ import assert from "node:assert";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { DEFAULT_CONFIG, PROJECT_SAFE_KEYS, ROUTABLE_TOOLS } from "../src/config.ts";
+import { AGENT_RESOURCE_DIRS } from "../src/hostpaths.ts";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 const readme = readFileSync(path.join(REPO, "README.md"), "utf8");
@@ -90,6 +91,47 @@ async function main(): Promise<void> {
 	});
 
 	console.log("\n--- documented strings match the code ---");
+
+	await test("the tools that may read the host are the ones documented", () => {
+		const source = readFileSync(path.join(REPO, "src", "index.ts"), "utf8");
+		const declared = source.match(/HOST_READ_TOOLS = new Set\(\[([^\]]*)\]/);
+		assert.ok(declared, "could not find the host-readable tool list in index.ts");
+		const names = [...declared[1].matchAll(/"([a-z]+)"/g)].map((match) => match[1]);
+		assert.deepStrictEqual(names, ["read", "ls", "find", "grep"]);
+		const row = readme.match(/\| What can look through it \|([^|]*)\|/);
+		assert.ok(row, "the README should say which tools can read host paths");
+		for (const name of names) {
+			assert.ok(row[1].includes(`\`${name}\``), `${name} is missing from the documented list`);
+		}
+		for (const name of ROUTABLE_TOOLS.filter((tool) => !names.includes(tool))) {
+			assert.ok(!row[1].includes(`\`${name}\``), `${name} cannot read host paths but is documented as if it can`);
+		}
+	});
+
+	await test("the readable part of pi's agent directory is documented exactly", () => {
+		for (const dir of AGENT_RESOURCE_DIRS) {
+			assert.match(readme, new RegExp(`\`${dir}\``), `${dir} is readable but the README does not say so`);
+		}
+		for (const secret of ["auth.json", "models-store.json", "sessions/"]) {
+			assert.ok(readme.includes(secret), `the README should state that ${secret} is never readable`);
+		}
+		assert.match(
+			readme,
+			/Nothing else is denied by name/,
+			"the README should be plain that there is no built-in secret-name filter",
+		);
+	});
+
+	await test("the host window's settings are the two documented ones", () => {
+		const windowKeys = KNOWN_KEYS.filter((key) => /host|readable/i.test(key));
+		assert.deepStrictEqual(
+			windowKeys,
+			["hostCommands", "readableHostPaths", "unreadableHostPatterns"],
+			"pi's own skills are not a switch: a session told to use a skill it cannot open is broken, not safer",
+		);
+		assert.match(readme, /always readable/, "the README should say pi's own resources are not optional");
+		assert.match(readme, /gitignore/i, "and how exclusions are written");
+	});
 
 	await test("footer strings in the README are the ones the code produces", () => {
 		// Compare shapes: drop interpolations and sample names, collapse spacing.

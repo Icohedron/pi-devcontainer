@@ -336,6 +336,68 @@ async function main(): Promise<void> {
 		}
 	});
 
+	console.log("\n--- readable host paths ---");
+
+	await test("readableHostPaths is empty by default", () => {
+		const { home, project, cleanup } = scaffold();
+		try {
+			const { config } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(config.readableHostPaths, []);
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("readableHostPaths is read from user settings", () => {
+		const { home, project, writeUser, cleanup } = scaffold();
+		try {
+			writeUser({ devcontainer: { readableHostPaths: ["~/reference", "/opt/docs"] } });
+			const { config, sources } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(config.readableHostPaths, ["~/reference", "/opt/docs"]);
+			assert.ok(sources[0]?.applied.includes("readableHostPaths"));
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("a wrongly typed readableHostPaths is ignored rather than half-applied", () => {
+		const { home, project, writeUser, cleanup } = scaffold();
+		try {
+			writeUser({ devcontainer: { readableHostPaths: ["/opt/docs", 7] } });
+			const { config } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(config.readableHostPaths, []);
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("unreadableHostPatterns is empty by default and read from user settings in order", () => {
+		const { home, project, writeUser, cleanup } = scaffold();
+		try {
+			const { config: defaults } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(defaults.unreadableHostPatterns, [], "nothing is excluded by default");
+
+			// Order is meaningful: last match wins, so it must survive loading.
+			writeUser({ devcontainer: { unreadableHostPatterns: ["*.pem", "!public.pem"] } });
+			const { config } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(config.unreadableHostPatterns, ["*.pem", "!public.pem"]);
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("pi's own skill and extension paths are collected from user settings", () => {
+		const { home, project, writeUser, writeProject, cleanup } = scaffold();
+		try {
+			writeUser({ skills: ["~/work/skills"], extensions: ["/opt/pi/ext.ts", 7] });
+			writeProject({ skills: ["./project-skills"] });
+			const { resourcePaths } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(resourcePaths, ["~/work/skills", "/opt/pi/ext.ts"]);
+		} finally {
+			cleanup();
+		}
+	});
+
 	console.log("\n--- robustness ---");
 
 	await test("up returns when the CLI exits, even if it leaves a child holding stdout", async () => {

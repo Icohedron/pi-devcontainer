@@ -40,6 +40,22 @@ export interface DevcontainerExtensionConfig {
 	upArgs: string[];
 	/** Commands that must run on the host, e.g. ["tuicr", "herdr"] */
 	hostCommands: string[];
+	/**
+	 * Host paths a routed session may read, e.g. ["~/reference"]. Read-only:
+	 * only read, ls, find and grep see them, never write, edit or bash.
+	 *
+	 * pi's own skills, extensions and documentation are always readable; they
+	 * are named in the system prompt by host path, so a routed session that
+	 * could not open them would be told to use skills it cannot load.
+	 */
+	readableHostPaths: string[];
+	/**
+	 * gitignore-style patterns for what must stay unreadable inside those roots,
+	 * e.g. ["*.env", ".ssh/", "!public/*.pem"]. Empty by default: the roots are
+	 * the boundary, and a built-in list of names that look like secrets would be
+	 * both wrong about ordinary files and incomplete.
+	 */
+	unreadableHostPatterns: string[];
 	/** Which built-in tools this extension claims and routes */
 	tools: string[];
 	/** Where user `!` commands run: in the container, or always on the host */
@@ -61,6 +77,11 @@ export interface ConfigSource {
 export interface LoadedConfig {
 	config: DevcontainerExtensionConfig;
 	sources: ConfigSource[];
+	/**
+	 * Skill and extension paths named in the user's own settings.json, so paths
+	 * pi was pointed at explicitly are readable alongside the default locations.
+	 */
+	resourcePaths: string[];
 }
 
 export const DEFAULT_CONFIG: DevcontainerExtensionConfig = {
@@ -70,6 +91,8 @@ export const DEFAULT_CONFIG: DevcontainerExtensionConfig = {
 	devcontainerPath: "devcontainer",
 	upArgs: [],
 	hostCommands: [],
+	readableHostPaths: [],
+	unreadableHostPatterns: [],
 	tools: [...ROUTABLE_TOOLS],
 	userBash: "container",
 	requireContainer: false,
@@ -89,6 +112,8 @@ const KNOWN_KEYS = new Set([
 	"devcontainerPath",
 	"upArgs",
 	"hostCommands",
+	"readableHostPaths",
+	"unreadableHostPatterns",
 	"tools",
 	"requireContainer",
 	"userBash",
@@ -149,6 +174,8 @@ function applyLayer(
 			case "execArgs":
 			case "upArgs":
 			case "hostCommands":
+			case "readableHostPaths":
+			case "unreadableHostPatterns":
 			case "tools": {
 				const items = asStringArray(value);
 				if (items) {
@@ -162,14 +189,33 @@ function applyLayer(
 	return { applied, unknown: unknownKeys, refused };
 }
 
-/** Read the "devcontainer" section out of a settings.json, if present. */
-function readSettingsSection(filePath: string): unknown {
+/** Read a settings.json, if it is there and parses. */
+function readSettingsFile(filePath: string): Record<string, unknown> | undefined {
 	try {
 		const parsed = parseJsonc(readFileSync(filePath, "utf8"));
-		return (parsed as Record<string, unknown>)?.[SETTINGS_KEY];
+		return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Skill and extension paths from pi's own top-level settings keys.
+ *
+ * These are not this extension's settings; they are read only to learn where
+ * pi's resources live, so a skill installed from a local checkout is readable
+ * too. Values may be files or directories, and may start with "~".
+ */
+function resourcePathsFrom(settings: Record<string, unknown> | undefined): string[] {
+	const found: string[] = [];
+	for (const key of ["skills", "extensions"]) {
+		const entries = settings?.[key];
+		if (!Array.isArray(entries)) continue;
+		for (const entry of entries) {
+			if (typeof entry === "string" && entry.trim()) found.push(entry.trim());
+		}
+	}
+	return found;
 }
 
 export interface LoadConfigOptions {
@@ -191,12 +237,19 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 		execArgs: [...DEFAULT_CONFIG.execArgs],
 		upArgs: [...DEFAULT_CONFIG.upArgs],
 		hostCommands: [...DEFAULT_CONFIG.hostCommands],
+		readableHostPaths: [...DEFAULT_CONFIG.readableHostPaths],
+		unreadableHostPatterns: [...DEFAULT_CONFIG.unreadableHostPatterns],
 		tools: [...DEFAULT_CONFIG.tools],
 	};
 	const sources: ConfigSource[] = [];
+	const resourcePaths: string[] = [];
 
 	const record = (label: string, filePath: string, allowedKeys?: ReadonlySet<string>): void => {
-		const raw = readSettingsSection(filePath);
+		const settings = readSettingsFile(filePath);
+		const raw = settings?.[SETTINGS_KEY];
+		// pi's own resource paths are read from user settings only: a project's
+		// are inside the workspace, which the container already sees.
+		if (!allowedKeys) resourcePaths.push(...resourcePathsFrom(settings));
 		if (raw === undefined) return;
 		const { applied, unknown, refused } = applyLayer(config, raw, allowedKeys);
 		sources.push({ label, path: filePath, applied });
@@ -208,7 +261,7 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 		if (refused.length > 0) {
 			console.warn(
 				`devcontainer: ignoring ${refused.join(", ")} in ${filePath}; ` +
-					"these decide what runs on the host and are only read from user settings",
+					"these decide what runs on the host or what it may read, and are only taken from user settings",
 			);
 		}
 	};
@@ -226,5 +279,5 @@ export function loadConfig(options: LoadConfigOptions): LoadedConfig {
 		record("project settings", path.join(options.cwd, options.configDirName, "settings.json"), PROJECT_SAFE_KEYS);
 	}
 
-	return { config, sources };
+	return { config, sources, resourcePaths };
 }

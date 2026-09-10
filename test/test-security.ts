@@ -14,6 +14,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { loadConfig, PROJECT_SAFE_KEYS } from "../src/config.ts";
+import { createHostReadPolicy } from "../src/hostpaths.ts";
 import { planHostCommand } from "../src/routing.ts";
 
 const ALLOWED = ["herdr"];
@@ -184,7 +185,6 @@ async function main(): Promise<void> {
 	});
 
 	console.log("\n--- requireContainer ---");
-
 	await test("requireContainer defaults off, preserving the documented host fallback", () => {
 		const { home, project, cleanup } = scaffold();
 		try {
@@ -219,6 +219,81 @@ async function main(): Promise<void> {
 			writeProject({ devcontainer: { requireContainer: false } });
 			const { config } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
 			assert.strictEqual(config.requireContainer, true, "a repo must not weaken the isolation guarantee");
+		} finally {
+			cleanup();
+		}
+	});
+
+	console.log("\n--- the read-only host window ---");
+
+	await test("a project cannot widen what the host exposes", () => {
+		const { home, project, writeProject, cleanup } = scaffold();
+		try {
+			writeProject({
+				devcontainer: { readableHostPaths: ["/", "~/.ssh"], unreadableHostPatterns: ["!**"] },
+			});
+			const { config } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(config.readableHostPaths, [], "a repo must not choose what host paths it can read");
+			assert.deepStrictEqual(config.unreadableHostPatterns, [], "nor what is excluded from them");
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("nothing on the host is readable unless it is configured", () => {
+		const { home, project, cleanup } = scaffold();
+		try {
+			const { config } = loadConfig({ configDirName: ".pi", cwd: project, trusted: true, home });
+			assert.deepStrictEqual(config.readableHostPaths, []);
+			const shut = createHostReadPolicy({ roots: [] });
+			for (const candidate of ["/etc/passwd", path.join(home, ".ssh", "id_rsa")]) {
+				assert.strictEqual(shut.decide(candidate).verdict, "container", candidate);
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("the widest possible root still cannot reach pi's own credentials", () => {
+		const { home, cleanup } = scaffold();
+		try {
+			const agentDir = path.join(home, ".pi", "agent");
+			// Even with everything readable and the exclusion list arguing for it.
+			const policy = createHostReadPolicy({ roots: ["/"], agentDir, ignore: ["!**", "!auth.json"] });
+			for (const secret of [
+				path.join(agentDir, "auth.json"),
+				path.join(agentDir, "settings.json"),
+				path.join(agentDir, "models-store.json"),
+				path.join(agentDir, "sessions", "session.jsonl"),
+			]) {
+				assert.strictEqual(policy.decide(secret).verdict, "denied", secret);
+			}
+		} finally {
+			cleanup();
+		}
+	});
+
+	await test("a wide root is the user's decision, and is not second-guessed", () => {
+		const { home, cleanup } = scaffold();
+		try {
+			// Stated plainly so the trade-off is visible: the roots are the
+			// boundary. A name filter here would be wrong about ordinary files
+			// and incomplete about real ones, while making a wide root feel safe.
+			const policy = createHostReadPolicy({ roots: ["/"], agentDir: path.join(home, ".pi", "agent") });
+			assert.strictEqual(policy.decide(path.join(home, ".ssh", "id_ed25519")).verdict, "readable");
+
+			const guarded = createHostReadPolicy({
+				roots: ["/"],
+				agentDir: path.join(home, ".pi", "agent"),
+				ignore: [".ssh/", ".aws/", "*.env"],
+			});
+			for (const secret of [
+				path.join(home, ".ssh", "id_ed25519"),
+				path.join(home, ".aws", "credentials"),
+				"/srv/app/production.env",
+			]) {
+				assert.strictEqual(guarded.decide(secret).verdict, "denied", secret);
+			}
 		} finally {
 			cleanup();
 		}

@@ -53,6 +53,10 @@ If the matching container is running, these tools execute inside it:
 | `find` | container `find`, globs matched in-process |
 | `grep` | container `rg` when present, otherwise `grep`; output formatted exactly like pi's built-in grep |
 
+`read`, `ls`, `find` and `grep` additionally see a small, read-only window onto
+the host, so pi's skills and extensions can still be opened from a routed
+session. See [Skills and extensions on the host](#skills-and-extensions-on-the-host).
+
 The system prompt's working directory is rewritten so the model knows it is
 working inside the container.
 
@@ -103,7 +107,9 @@ you and the model can use either.
 container equivalent, so `read /home/me/app/src/a.ts` and `read src/a.ts` reach
 the same file. Any other absolute path is passed through untouched and therefore
 means the *container's* copy: `/etc/hosts` is the container's `/etc/hosts`, which
-is the point of routing.
+is the point of routing. The one exception is the read-only window described in
+[Skills and extensions on the host](#skills-and-extensions-on-the-host), which
+covers pi's own resources and any `readableHostPaths` you add.
 
 **Out to the host.** Only commands listed in `hostCommands` run on the host, and
 their arguments get the reverse treatment: a path under the container workspace
@@ -126,6 +132,169 @@ equivalent, so relative paths mean what they do on the host. `/devcontainer up`
 always targets the directory holding the configuration, not the directory you
 happen to be in.
 
+### Skills and extensions on the host
+
+pi's skills and extensions live on the host, in `~/.pi/agent/skills`,
+`~/.pi/agent/extensions`, the packages under `~/.pi/agent/npm` and `git`, and
+wherever else your settings point. The system prompt names them by *host* path:
+
+```
+<location>/home/me/.pi/agent/skills/tuicr/SKILL.md</location>
+```
+
+Route every tool call into the container and that path does not exist any more,
+so the model is told to use a skill it cannot open. The same goes for pi's own
+documentation, which the prompt points at by path.
+
+So those paths stay readable, through a deliberately narrow window:
+
+| | |
+|---|---|
+| What can look through it | `read`, `ls`, `find`, `grep` |
+| What cannot | `write`, `edit`, `bash`, `!` commands, `hostCommands` arguments |
+| What is behind it | pi's skills, extensions, installed packages, prompts, themes, tools and docs, plus any `readableHostPaths` you add |
+
+It is read-only because nothing writes through it: `write`, `edit` and `bash`
+have no host code path at all, and a write aimed at one of these paths is
+refused rather than quietly landing somewhere. Anything not behind the window
+keeps meaning the container's copy, exactly as before, and paths inside the
+workspace are always routed since the container is already looking at the same
+files.
+
+pi's own resources are not a setting. A skill the prompt names is a skill the
+model is told to open, so a switch for this would only produce sessions that
+are instructed to do something they cannot do. It would protect nothing either:
+what is behind the window by default is the skills, extensions and packages you
+installed — source and Markdown — while pi's credentials are excluded
+structurally, below. If you do not want skills read, do not load them; that is
+what pi's `--no-skills` is for.
+
+One consequence worth stating: extension and skill *source* becomes readable,
+so an API key hardcoded in your own extension is visible to a routed session
+just as it already is to an unrouted one. Keep keys in the environment.
+
+#### Other host paths
+
+`readableHostPaths` adds your own, with the same read-only rules. Add only what
+you mean to share; the roots are the boundary, and nothing inside one is second
+guessed:
+
+```jsonc
+// ~/.pi/agent/settings.json
+{
+  "devcontainer": {
+    "readableHostPaths": ["~/reference", "/opt/design-docs"]
+  }
+}
+```
+
+Entries may use `~`, may be files or directories, and are resolved against the
+directory pi started in when relative. Entries inside the workspace are skipped:
+the container has them already.
+
+#### What is never behind it
+
+One rule is built in, and it is structural rather than a guess: **pi's agent
+directory is readable only in `skills`, `extensions`, `npm`, `git`, `prompts`,
+`themes` and `tools`.** `auth.json`, `settings.json` (MCP servers carry keys),
+`models-store.json`, `sessions/` and everything else beside them are refused at
+any root, whatever `unreadableHostPatterns` says, including through a symlink.
+These are pi's own files in a fixed layout, so no guessing is involved.
+
+Nothing else is denied by name. A root is the boundary: this extension does not
+ship a list of names that look like secrets, because such a list is wrong about
+ordinary files — npm packages ship `generate_secret.d.ts`, skills ship
+`api-keys.md` — and incomplete about real ones, since a key can live in a file
+called anything. The dangerous part would be the feeling of safety it gives to
+a root that should not have been added.
+
+#### Keeping things out, gitignore style
+
+`unreadableHostPatterns` takes gitignore syntax: `!` puts something back, a
+trailing `/` names a directory, and **the last matching entry wins**. Comments
+are the JSONC `//` ones, as everywhere else in `settings.json`; an entry that
+begins with `#` is skipped as well, so a block pasted out of a `.gitignore`
+works as it stands.
+
+What a pattern is matched against is the part worth being precise about, since
+the window has many roots at once — `~/.pi/agent/skills`, `~/.pi/agent/npm` and
+each of the others are separate roots, so "relative to the root" would make one
+list mean different things in different places. It is simpler than that:
+
+| Pattern | Excludes a path when | Example |
+|---------|----------------------|---------|
+| no slash | one of its components is that name | `id_rsa`, `*.pem`, `secrets/` |
+| contains a slash | the absolute path **ends with** it, or is inside something that does | `extensions/pi-foo/config.json` |
+| begins with `/` or `~/` | the absolute path **is** it, or is inside it | `~/work/keys` |
+
+Components are matched whole: a slashed pattern lines up with the end of the
+path at a `/`, never mid-name. So
+`/home/me/.pi/agent/extensions/pi-foo/config.json` is excluded by any of
+`config.json`, `*.json`, `pi-foo/`, `extensions/pi-foo/config.json` or
+`~/.pi/agent/extensions`, and is not excluded by `agent/config.json`, which the
+path does not end with.
+
+You therefore write a path the way it reads on disk, and never work out which
+root something fell under. Two further differences from git, both deliberate:
+matching is case-insensitive, so `ID_RSA` cannot slip past a rule for `id_rsa`;
+and `*` matches dot-prefixed names, so `*.env` excludes `.env` — most glob
+implementations do neither, and both would be silent holes here.
+
+Exclusions are checked against the symlink destination too.
+
+```jsonc
+// ~/.pi/agent/settings.json
+{
+  "devcontainer": {
+    "readableHostPaths": ["~"],
+    "unreadableHostPatterns": [
+      ".ssh/", ".gnupg/", ".aws/", ".kube/", ".docker/",
+      ".netrc", ".npmrc", ".git-credentials",
+      "*.env", ".env.*",
+      "*.pem", "*.key", "*.p12",
+      "secrets/",
+      "!certs/public.pem"      // put one back
+    ]
+  }
+}
+```
+
+Start narrow instead, and most of this is unnecessary: a root that contains
+only what you meant to share needs no exclusions at all.
+
+They apply everywhere the window looks, pi's own resource directories included.
+Another extension that keeps a config file beside itself, or a package that
+ships one, is excluded like anything else:
+
+```jsonc
+"unreadableHostPatterns": ["extensions/*/config.json", "npm/**/credentials.json"]
+```
+
+An extension that keeps state *directly* under `~/.pi/agent/` — a
+`my-extension/` directory beside `sessions/` and `auth.json` — needs no rule at
+all: the structural rule above already excludes everything there that is not one
+of pi's resource directories.
+
+`/devcontainer` lists the roots in effect, if you want to see what the window
+is currently showing.
+
+##### Not the workspace
+
+Patterns only narrow the host window, and the host window is only `read`, `ls`,
+`find` and `grep` looking outside the container, read-only. Workspace paths
+never enter it: they are routed like everything else in the project, and the
+container reads them from the same bind mount, so the project's own `.env`
+behaves as it always has. `bash` is routed too, unfiltered, which is why
+claiming otherwise would be theatre.
+
+Keeping the workspace out of the window is also what stops the agent — which
+can create files there and nowhere else on the host — from planting a symlink
+that points into it.
+
+Neither key can be set by a project's `.pi/settings.json`. A repository the
+agent can write to must not be able to choose what the agent may read on the
+host.
+
 ## Startup message
 
 Routing active, shown as an ordinary notification:
@@ -135,6 +304,8 @@ Routing active, shown as an ordinary notification:
   devcontainer.json: /home/me/app/.devcontainer/devcontainer.json
   container:         nifty_hopper
   workspace:         /workspaces/app (host: /home/me/app)
+  routed tools:      read, write, edit, bash, grep, find, ls
+  host reads:        pi skills, extensions and docs (read-only)
 ```
 
 No devcontainer found. This is a **warning**, which pi renders in its warning
@@ -186,6 +357,8 @@ Run `/devcontainer` with no argument to open a details panel with a routing togg
  User          vscode
  Shell         bash · ripgrep: no (using grep)
  Routed tools  read, write, edit, bash, grep, find, ls
+ ! commands    container
+ Host reads    pi skills, extensions and docs (read-only)
 
 → Route tool calls into container  on
    Off runs read, write, edit, bash, grep, find, ls and ! commands on the host
@@ -245,6 +418,8 @@ values are ignored with a warning rather than failing the session.
 | `devcontainerPath` | string | `"/opt/homebrew/bin/devcontainer"` | Default `devcontainer`. The CLI used by `/devcontainer up` |
 | `upArgs` | string[] | `["--remove-existing-container"]` | Default none. Extra flags for `devcontainer up` |
 | `hostCommands` | string[] | `["tuicr", "herdr"]` | Default none. Commands that must run on the host rather than in the container |
+| `readableHostPaths` | string[] | `["~/reference"]` | Default none. Extra host paths a routed session may read, on top of pi's own skills, extensions and docs, which are always readable. Read-only: only `read`, `ls`, `find` and `grep` see them |
+| `unreadableHostPatterns` | string[] | `["*.pem", "!public.pem"]` | Default none. gitignore-style entries for what must stay unreadable inside those paths: `!` puts something back, last match wins. pi's own credentials are excluded regardless |
 | `tools` | string[] | `["bash", "write", "edit"]` | Default all seven. Which built-ins to claim |
 | `userBash` | `"container"` \| `"host"` | `"host"` | Default `"container"`. Where `!` commands run |
 | `requireContainer` | boolean | `true` | Default `false`. Fail tool calls instead of falling back to the host when there is no container |
@@ -262,6 +437,8 @@ Every key at once, for reference:
     "devcontainerPath": "devcontainer",
     "upArgs": ["--remove-existing-container"],
     "hostCommands": ["tuicr", "herdr"],
+    "readableHostPaths": ["~/reference", "/opt/design-docs"],
+    "unreadableHostPatterns": [".ssh/", "*.pem", "!public.pem"],
     "tools": ["read", "write", "edit", "bash", "grep", "find", "ls"],
     "userBash": "container",
     "requireContainer": false
@@ -398,6 +575,10 @@ picks `bash` or falls back to `sh`.
   container use the image's own default user rather than failing the call.
 - `.git` and `node_modules` are skipped by `find` and `grep`. Without `rg` in the
   container, `.gitignore` is not honored by `grep`.
+- Reading a host path through the read-only window uses pi's own tools on the
+  host, so `find` and `grep` behave there exactly as they do in an unrouted
+  session, `.gitignore` included. Writing to one is refused rather than routed,
+  so a refusal never silently creates a container-side file with the same name.
 - Aborts and timeouts kill the process inside the container.
 - Detection runs in the background at session start, so pi is usable
   immediately. The startup message and the footer appear when it finishes, and
