@@ -65,8 +65,10 @@ the second item, and the CLI is not necessary. If you do not use
 
 **In the container**
 
-A shell and the core commands. The extension uses `rg` for `grep` if the
-container has it, or `grep` if it does not. At detection, the extension executes
+A shell, `setsid`, and the core commands. Routed `bash` and `!` commands use
+`setsid` so Esc and timeouts can stop their in-container process group, not just
+the local container CLI. The extension uses `rg` for `grep` if the container has
+it, or `grep` if it does not. At detection, the extension executes
 `command -v rg` in the container one time. The same operation selects `bash` or
 `sh`.
 

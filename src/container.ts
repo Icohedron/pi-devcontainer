@@ -6,6 +6,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { DevcontainerExtensionConfig } from "./config.ts";
 import type { DevcontainerConfig } from "./discovery.ts";
@@ -501,6 +502,101 @@ export function containerExec(
 		});
 		child.on("close", (code) => conclude(code));
 	});
+}
+
+/**
+ * Run a shell as its own in-container process group. Killing the local
+ * docker/podman exec client does NOT kill the command inside the container.
+ * Handshake with the remote shell first, then kill its process group through a
+ * separate exec on cancellation or timeout. `setsid` is needed so that the
+ * group cannot include other container processes.
+ */
+export async function containerBashExec(
+	target: ContainerTarget,
+	shell: string,
+	command: string,
+	options: ExecOptions = {},
+): Promise<ExecResult> {
+	const { signal, timeout, onData, ...rest } = options;
+	if (signal?.aborted) throw new Error("aborted");
+	const prefix = `\u001e${randomUUID()}:`;
+	const local = new AbortController();
+	let pid: number | undefined;
+	let pending = false;
+	let timedOut = false;
+	let starting = "";
+	let stopping: Promise<void> | undefined;
+	let grace: NodeJS.Timeout | undefined;
+
+	const stop = () => {
+		pending = true;
+		if (pid === undefined) {
+			if (!grace) grace = setTimeout(() => local.abort(), 5000);
+			return;
+		}
+		if (stopping) return;
+		if (grace) clearTimeout(grace);
+		// The cleanup must not use the cancelled signal. A short deadline prevents
+		// an unresponsive runtime from keeping the tool call open forever.
+		stopping = containerExec(target, ["sh", "-c", 'kill -KILL "-$1" 2>/dev/null || :', "sh", String(pid)], {
+			timeout: 5,
+		})
+			.then(() => undefined, () => undefined)
+			.finally(() => local.abort());
+	};
+	const onAbort = () => stop();
+	signal?.addEventListener("abort", onAbort, { once: true });
+	const timer = timeout && timeout > 0 ? setTimeout(() => {
+		timedOut = true;
+		stop();
+	}, timeout * 1000) : undefined;
+
+	// The signal can race the listener registration above.
+	if (signal?.aborted) stop();
+	const onOutput = (chunk: Buffer) => {
+		if (pid !== undefined) {
+			onData?.(chunk);
+			return;
+		}
+		starting += chunk.toString();
+		const start = starting.indexOf(prefix);
+		if (start === -1) return;
+		const end = starting.indexOf("\n", start);
+		if (end === -1) return;
+		const candidate = Number(starting.slice(start + prefix.length, end));
+		if (!Number.isSafeInteger(candidate) || candidate <= 0) return;
+		pid = candidate;
+		if (start > 0) onData?.(Buffer.from(starting.slice(0, start)));
+		const tail = starting.slice(end + 1);
+		starting = "";
+		if (pending) stop();
+		if (tail) onData?.(Buffer.from(tail));
+	};
+
+	try {
+		// Launch setsid as a child of sh: that child is not yet a process-group
+		// leader, so setsid does not fork and the parent's wait tracks the shell.
+		const announce = `printf '${prefix}%s\\n' "$$"; exec "$@"`;
+		const result = await containerExec(
+			target,
+			["sh", "-c", 'setsid "$@" & wait $!', "sh", "sh", "-c", announce, "sh", shell, "-lc", command],
+			{ ...rest, signal: local.signal, onData: onOutput },
+		);
+		if (starting) onData?.(Buffer.from(starting));
+		if (stopping) await stopping;
+		if (timedOut) throw new Error(`timeout:${timeout}`);
+		if (pending) throw new Error("aborted");
+		return result;
+	} catch (error) {
+		if (stopping) await stopping;
+		if (timedOut) throw new Error(`timeout:${timeout}`);
+		if (pending) throw new Error("aborted");
+		throw error;
+	} finally {
+		if (timer) clearTimeout(timer);
+		if (grace) clearTimeout(grace);
+		signal?.removeEventListener("abort", onAbort);
+	}
 }
 
 /** Run argv and throw when it exits non-zero. */

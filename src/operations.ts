@@ -23,7 +23,7 @@ import {
 	truncateLine,
 	type WriteOperations,
 } from "@earendil-works/pi-coding-agent";
-import { type ContainerTarget, containerExec, containerExecOk } from "./container.ts";
+import { type ContainerTarget, containerBashExec, containerExec, containerExecOk } from "./container.ts";
 
 const DEFAULT_GREP_LIMIT = 100;
 const SKIP_DIRS = [".git", "node_modules"];
@@ -242,7 +242,7 @@ export function createContainerBashOps(
 				}
 			}
 			const inner = envArgs.length > 0 ? `export ${envArgs.map(shellQuote).join(" ")}; ${command}` : command;
-			const result = await containerExec(target, [shell, "-lc", inner], {
+			const result = await containerBashExec(target, shell, inner, {
 				cwd: containerCwd,
 				signal,
 				timeout,
